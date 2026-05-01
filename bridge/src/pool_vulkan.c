@@ -104,33 +104,111 @@ static int load_dispatch(vk_state_t *st,
     return 0;
 }
 
-static uint32_t map_format_features_to_usage(VkFormatFeatureFlags ff) {
-    uint32_t u = 0;
-    if (ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)        u |= WW_USAGE_SAMPLED;
-    if (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)        u |= WW_USAGE_STORAGE;
-    if (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)     u |= WW_USAGE_COLOR_ATTACHMENT;
-    if (ff & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT)         u |= WW_USAGE_TRANSFER_SRC;
-    if (ff & VK_FORMAT_FEATURE_TRANSFER_DST_BIT)         u |= WW_USAGE_TRANSFER_DST;
-    return u;
+/* fourcc → VkFormat. Mirrors waywallen-display/src/backend_vulkan.c
+ * s_vk_fourcc_table — producer and consumer must agree on the same
+ * advertised set, since the daemon negotiator compares fourccs by
+ * exact integer. */
+struct vk_fourcc_entry {
+    uint32_t fourcc;
+    VkFormat vk_format;
+};
+static const struct vk_fourcc_entry s_vk_fourcc_table[] = {
+    { WW_DRM_FORMAT_ABGR8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_XBGR8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_ARGB8888, VK_FORMAT_B8G8R8A8_UNORM },
+    { WW_DRM_FORMAT_XRGB8888, VK_FORMAT_B8G8R8A8_UNORM },
+    { WW_DRM_FORMAT_RGBA8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_BGRA8888, VK_FORMAT_B8G8R8A8_UNORM },
+    { WW_DRM_FORMAT_RGBX8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_BGRX8888, VK_FORMAT_B8G8R8A8_UNORM },
+};
+
+static VkFormat fourcc_to_vk_format(uint32_t fourcc) {
+    for (size_t i = 0; i < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]); ++i) {
+        if (s_vk_fourcc_table[i].fourcc == fourcc) return s_vk_fourcc_table[i].vk_format;
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+/* Reverse of map_format_features_to_usage (kept for advertise debug
+ * logging). Translate the producer's chosen image_usage into the set
+ * of format-feature bits a modifier MUST support to back that usage,
+ * so probe_caps can filter advertise candidates down to modifiers
+ * alloc_slot will actually accept. */
+static VkFormatFeatureFlags usage_to_format_features(VkImageUsageFlags usage) {
+    VkFormatFeatureFlags f = 0;
+    if (usage & VK_IMAGE_USAGE_SAMPLED_BIT)            f |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if (usage & VK_IMAGE_USAGE_STORAGE_BIT)            f |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    if (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)   f |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    if (usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)       f |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    if (usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)       f |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return f;
 }
 
 static int probe_caps(ww_pool_t *pool, uint32_t width, uint32_t height) {
     (void)width; (void)height; /* Vulkan modifiers don't depend on extent at probe time. */
     vk_state_t *st = (vk_state_t *)pool->backend_data;
 
-    /* Two-call enumeration of modifier list for ABGR8888. */
-    VkDrmFormatModifierPropertiesListEXT mod_list = {0};
-    mod_list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
-    VkFormatProperties2 fp2 = {0};
-    fp2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
-    fp2.pNext = &mod_list;
-    st->vkGetPhysicalDeviceFormatProperties2(
-        st->phys, VK_FORMAT_R8G8B8A8_UNORM, &fp2);
+    /* Walk every candidate fourcc, pull the modifier list per-format,
+     * and keep only the modifiers whose tilingFeatures cover the
+     * producer's image_usage. Mirrors the consumer's filter (display
+     * backend_vulkan.c). */
+    const VkFormatFeatureFlags want_features =
+        usage_to_format_features(st->image_usage);
 
-    if (mod_list.drmFormatModifierCount == 0) {
+    /* Worst-case sizing: every fourcc × every modifier. We grow the
+     * entries array dynamically as we go. */
+    ww_format_entry_t *entries = NULL;
+    size_t entries_count = 0;
+    size_t entries_cap   = 0;
+
+    for (size_t fi = 0; fi < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]); ++fi) {
+        uint32_t fourcc    = s_vk_fourcc_table[fi].fourcc;
+        VkFormat vk_format = s_vk_fourcc_table[fi].vk_format;
+
+        /* Two-call enumeration of modifier list for this fourcc. */
+        VkDrmFormatModifierPropertiesListEXT mod_list = {0};
+        mod_list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+        VkFormatProperties2 fp2 = {0};
+        fp2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+        fp2.pNext = &mod_list;
+        st->vkGetPhysicalDeviceFormatProperties2(st->phys, vk_format, &fp2);
+
+        if (mod_list.drmFormatModifierCount == 0) continue;
+
+        VkDrmFormatModifierPropertiesEXT *probed =
+            (VkDrmFormatModifierPropertiesEXT *)calloc(
+                mod_list.drmFormatModifierCount, sizeof(*probed));
+        if (!probed) { free(entries); return -ENOMEM; }
+        mod_list.pDrmFormatModifierProperties = probed;
+        st->vkGetPhysicalDeviceFormatProperties2(st->phys, vk_format, &fp2);
+
+        for (uint32_t i = 0; i < mod_list.drmFormatModifierCount; ++i) {
+            VkFormatFeatureFlags ff = probed[i].drmFormatModifierTilingFeatures;
+            if ((ff & want_features) != want_features) continue;
+
+            if (entries_count == entries_cap) {
+                size_t new_cap = entries_cap ? entries_cap * 2 : 16;
+                ww_format_entry_t *grow = (ww_format_entry_t *)realloc(
+                    entries, new_cap * sizeof(*grow));
+                if (!grow) { free(probed); free(entries); return -ENOMEM; }
+                entries     = grow;
+                entries_cap = new_cap;
+            }
+            entries[entries_count].fourcc      = fourcc;
+            entries[entries_count].modifier    = probed[i].drmFormatModifier;
+            entries[entries_count].plane_count = probed[i].drmFormatModifierPlaneCount;
+            ++entries_count;
+        }
+        free(probed);
+    }
+
+    if (entries_count == 0) {
         fprintf(stderr,
-                "ww_pool[vulkan]: driver reports 0 modifiers for ABGR8888 — "
-                "advertising single LINEAR fallback\n");
+                "ww_pool[vulkan]: no (fourcc, modifier) pairs satisfy producer "
+                "image_usage=0x%x — falling back to single LINEAR ABGR8888\n",
+                st->image_usage);
+        free(entries);
         ww_format_entry_t *ent = (ww_format_entry_t *)calloc(1, sizeof(*ent));
         if (!ent) return -ENOMEM;
         ent[0].fourcc      = WW_DRM_FORMAT_ABGR8888;
@@ -138,36 +216,10 @@ static int probe_caps(ww_pool_t *pool, uint32_t width, uint32_t height) {
         ent[0].plane_count = 1;
         pool->caps.entries = ent;
         pool->caps.count   = 1;
-        goto fill_secondary;
+    } else {
+        pool->caps.entries = entries;
+        pool->caps.count   = entries_count;
     }
-
-    VkDrmFormatModifierPropertiesEXT *probed =
-        (VkDrmFormatModifierPropertiesEXT *)calloc(
-            mod_list.drmFormatModifierCount, sizeof(*probed));
-    if (!probed) return -ENOMEM;
-    mod_list.pDrmFormatModifierProperties = probed;
-    st->vkGetPhysicalDeviceFormatProperties2(
-        st->phys, VK_FORMAT_R8G8B8A8_UNORM, &fp2);
-
-    ww_format_entry_t *entries = (ww_format_entry_t *)calloc(
-        mod_list.drmFormatModifierCount, sizeof(*entries));
-    if (!entries) { free(probed); return -ENOMEM; }
-
-    for (uint32_t i = 0; i < mod_list.drmFormatModifierCount; ++i) {
-        entries[i].fourcc      = WW_DRM_FORMAT_ABGR8888;
-        entries[i].modifier    = probed[i].drmFormatModifier;
-        entries[i].plane_count = probed[i].drmFormatModifierPlaneCount;
-        /* usages collected in flatten by reading the entry's modifier
-         * back through the format props — but we discard per-modifier
-         * usage and just emit SAMPLED on advertise. The format-feature
-         * mask is logged for debugging. */
-        (void)map_format_features_to_usage;
-    }
-    pool->caps.entries = entries;
-    pool->caps.count   = mod_list.drmFormatModifierCount;
-    free(probed);
-
-fill_secondary: ;
     /* Fill device/driver UUID. */
     if (st->vkGetPhysicalDeviceProperties2) {
         VkPhysicalDeviceIDProperties id_props = {0};
@@ -240,11 +292,19 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     ext_img.pNext       = &mod_list;
     ext_img.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
+    VkFormat vk_format = fourcc_to_vk_format(d->fourcc);
+    if (vk_format == VK_FORMAT_UNDEFINED) {
+        fprintf(stderr,
+                "ww_pool[vulkan]: directive fourcc 0x%08x has no VkFormat mapping\n",
+                d->fourcc);
+        return -EINVAL;
+    }
+
     VkImageCreateInfo img_ci = {0};
     img_ci.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     img_ci.pNext         = &ext_img;
     img_ci.imageType     = VK_IMAGE_TYPE_2D;
-    img_ci.format        = VK_FORMAT_R8G8B8A8_UNORM;
+    img_ci.format        = vk_format;
     img_ci.extent.width  = d->width;
     img_ci.extent.height = d->height;
     img_ci.extent.depth  = 1;
