@@ -156,6 +156,8 @@ qt_add_qml_module(
   QtQuick.Dialogs
   Qcm.Material
   waywallen.control
+  OUTPUT_TARGETS
+  waywallen_ui_targets
   RESOURCE_PREFIX
   /
   VERSION

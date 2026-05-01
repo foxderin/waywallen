@@ -32,8 +32,11 @@ dependencies:
   # Vulkan headers (with the conda sysroot active, /usr/include is no longer visible by default)
   - vulkan-headers
 
-  # FFmpeg (the image renderer links libav*)
-  - ffmpeg
+  # FFmpeg is built from source by scripts/build_ffmpeg.sh — it gives us a
+  # known-minimal codec set and the same sysroot baseline as the rest of the
+  # tree. nasm is needed for the asm optimizations; make for ffmpeg's build.
+  - nasm
+  - make
 
   # Build infrastructure
   - cmake>=3.28

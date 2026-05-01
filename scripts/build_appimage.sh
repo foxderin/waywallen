@@ -57,6 +57,9 @@ set +u
 conda activate "$ENV_NAME"
 set -u
 
+# ---- 2.4 Build a minimal FFmpeg into the conda env (replaces conda-forge's ffmpeg) ----
+bash "$PROJECT_DIR/scripts/build_ffmpeg.sh"
+
 # ---- 2.5 Build the Qt6Protobuf module from source (conda-forge has no qtgrpc package) ----
 QT_VER="$("$CONDA_PREFIX/bin/qmake6" -query QT_VERSION)"
 if [[ ! -f "$CONDA_PREFIX/lib/cmake/Qt6Protobuf/Qt6ProtobufConfig.cmake" ]]; then
@@ -110,25 +113,10 @@ step "Installing into AppDir: $APPDIR"
 rm -rf "$APPDIR"
 cmake --install "$BUILD_DIR"
 
-# qml_material is pulled in via FetchContent + FIND_PACKAGE_ARGS GLOBAL.
-# CMake 4.x does not wire its install rules into the parent project's
-# cmake_install. Copy the missing pieces by hand:
-#   - libqml_material.so      -> usr/lib/
-#   - qml_modules/Qcm/        -> usr/qml/Qcm/        (linuxdeploy-plugin-qt's
-#   - qml_modules/waywallen/  -> usr/qml/waywallen/   generated qt.conf sets
-#                                                     Qml2Imports = qml, so
-#                                                     everything goes there)
-step "Filling in qml_material and our own QML modules into AppDir"
-QML_OUT="$INSTALL_DIR/qml"
-mkdir -p "$QML_OUT" "$INSTALL_DIR/lib"
-cp "$BUILD_DIR/_deps/qml_material-build/libqml_material.so" "$INSTALL_DIR/lib/"
-cp -r "$BUILD_DIR/qml_modules/Qcm"       "$QML_OUT/"
-cp -r "$BUILD_DIR/qml_modules/waywallen" "$QML_OUT/"
-
-# ---- 5. Fetch linuxdeploy / appimagetool (cached on first run under build/_tools) ----
+# # ---- 5. Fetch linuxdeploy / appimagetool (cached on first run under build/_tools) ----
 mkdir -p "$TOOLS_DIR"
 LINUXDEPLOY="$TOOLS_DIR/linuxdeploy-x86_64.AppImage"
-LINUXDEPLOY_QT="$TOOLS_DIR/linuxdeploy-plugin-qt-x86_64.AppImage"
+LINUXDEPLOY_QT="$TOOLS_DIR/linuxdeploy_plugin_qt"
 APPIMAGETOOL="$TOOLS_DIR/appimagetool-x86_64.AppImage"
 download_if_missing() {
     local url="$1" dest="$2"
@@ -178,16 +166,19 @@ ICON_FILE="$INSTALL_DIR/share/icons/hicolor/scalable/apps/org.waywallen.waywalle
 [[ -f "$DESKTOP_FILE" ]] || fail "missing .desktop file: $DESKTOP_FILE"
 [[ -f "$ICON_FILE"   ]] || fail "missing icon: $ICON_FILE"
 
-# - EXTRA_PLATFORM_PLUGINS: xcb is the default; the Wayland platform plugin
-#   has to be requested explicitly.
-# - EXTRA_QT_PLUGINS: Wayland also needs the decoration / graphics-integration
-#   / shell-integration plugin directories alongside the platform plugin.
+pushd $TOOLS_DIR
+$LINUXDEPLOY_QT --appimage-extract
+$LINUXDEPLOY --appimage-extract
+LINUXDEPLOY=$TOOLS_DIR/squashfs-root/AppRun
+popd
+
 cd "$PROJECT_DIR/build"
 PATH="$TOOLS_DIR:$PATH" \
+LD_LIBRARY_PATH="$INSTALL_DIR/lib:$CONDA_PREFIX/lib" \
 QMAKE="$CONDA_PREFIX/bin/qmake6" \
 EXTRA_PLATFORM_PLUGINS="libqwayland.so" \
-EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration" \
-"$LINUXDEPLOY" --appimage-extract-and-run \
+EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-shell-integration" \
+"$LINUXDEPLOY" \
     --appdir "$APPDIR" \
     --plugin qt \
     --executable "$INSTALL_DIR/bin/waywallen" \
@@ -216,6 +207,11 @@ for libdir in "$APPDIR/usr/lib" "$APPDIR/usr/lib64"; do
         prune_glob "$libdir" "$pat"
     done
 done
+cp -rv "$CONDA_PREFIX/lib/qt6/plugins/wayland-graphics-integration-client" "$APPDIR/usr/plugins/"
+cp -v "$CONDA_PREFIX/lib/libstdc++.so.6" "$APPDIR/usr/lib/"
+cp -v "$CONDA_PREFIX/lib/libgcc_s.so.1" "$APPDIR/usr/lib/"
+cp -rv "$APPDIR/usr/lib/qt6/qml/." "$APPDIR/usr/qml/"
+rm -rf "$APPDIR/usr/lib/qt6"
 
 # ---- 9. Pack the AppImage ----
 step "Packing AppImage"
