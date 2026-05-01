@@ -32,5 +32,6 @@ cmake --install build/clang-release
 ```bash
 cd ./install
 export QML_IMPORT_PATH=./lib/qt6/qml
+export LD_LIBRARY_PATH="$PWD/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ../target/release/waywallen --ui ./bin/waywallen-ui --plugin ./share/waywallen
 ```
