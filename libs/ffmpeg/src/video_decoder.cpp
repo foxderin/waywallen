@@ -62,6 +62,23 @@ using BufRefPtr   = std::unique_ptr<AVBufferRef, BufRefDeleter>;
 bool fail(DecodeError* err, std::string m);
 std::string av_err_str(int rc);
 
+/* Translate FFmpeg's colorspace/range enums into our ColorSpace /
+ * ColorRange ints (which the public Nv12Frame / VkFrameView carry).
+ * Unknowns default to BT.709 limited — the most common case. */
+uint32_t map_colorspace(int cs) {
+    switch (cs) {
+    case AVCOL_SPC_BT709:        return 0;
+    case AVCOL_SPC_BT470BG:      // PAL / BT.601 625
+    case AVCOL_SPC_SMPTE170M:    return 1;
+    case AVCOL_SPC_BT2020_NCL:   return 2;
+    case AVCOL_SPC_BT2020_CL:    return 2;
+    default:                     return 0;
+    }
+}
+uint32_t map_range(int r) {
+    return (r == AVCOL_RANGE_JPEG) ? 1u : 0u;
+}
+
 /* `get_format` callback: prefer AV_PIX_FMT_VULKAN whenever the codec
  * offers it; fall back to whatever FFmpeg picks by default otherwise.
  * In shared-device mode this also allocates the codec's hw_frames_ctx
@@ -378,6 +395,8 @@ FrameStatus VideoDecoder::next_vk_frame(VkFrameView& out, DecodeError* err) {
             out.plane_count  = (vkf->img[1] != VK_NULL_HANDLE) ? 2u : 1u;
             out.width        = static_cast<uint32_t>(st.src_frame->width);
             out.height       = static_cast<uint32_t>(st.src_frame->height);
+            out.colorspace   = map_colorspace(st.src_frame->colorspace);
+            out.color_range  = map_range(st.src_frame->color_range);
             const int64_t pts = (st.src_frame->best_effort_timestamp != AV_NOPTS_VALUE)
                 ? st.src_frame->best_effort_timestamp
                 : st.src_frame->pts;
@@ -496,6 +515,8 @@ FrameStatus VideoDecoder::next_frame(Nv12Frame& out, DecodeError* err) {
             out.pts_seconds = (pts == AV_NOPTS_VALUE)
                 ? -1.0
                 : static_cast<double>(pts) * av_q2d(st.stream_tb);
+            out.colorspace  = map_colorspace(feed->colorspace);
+            out.color_range = map_range(feed->color_range);
             av_frame_unref(st.src_frame.get());
             if (st.sw_frame) av_frame_unref(st.sw_frame.get());
             return FrameStatus::ok;

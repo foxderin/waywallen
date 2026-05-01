@@ -33,9 +33,13 @@ struct Nv12Frame {
     std::vector<uint8_t> data;
     uint32_t             width  { 0 };
     uint32_t             height { 0 };
-    // Stream-time PTS in seconds; -1.0 if unavailable. Iter 2 ignores
-    // this; Iter 3's presenter clock honors it.
+    // Stream-time PTS in seconds; -1.0 if unavailable.
     double               pts_seconds { -1.0 };
+    // Source colorspace / range — caller feeds these into the YuvToRgba
+    // colour matrix builder. Defaults to BT.709 limited range when the
+    // stream doesn't tag them.
+    uint32_t             colorspace { 0 };  // matches our ColorSpace enum
+    uint32_t             color_range { 0 }; // matches our ColorRange enum
 };
 
 struct DecodeError {
@@ -68,6 +72,8 @@ struct VkFrameView {
     uint32_t       width;
     uint32_t       height;
     double         pts_seconds;
+    uint32_t       colorspace { 0 };
+    uint32_t       color_range { 0 };
 };
 
 class VideoDecoder {

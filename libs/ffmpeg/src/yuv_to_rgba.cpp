@@ -8,6 +8,74 @@
 
 namespace waywallen::ffvk {
 
+/* Push-constant struct mirroring `PC` in shaders/nv12_to_rgba.comp.
+ * std140-friendly: padded to 16-byte boundaries. */
+struct alignas(16) ShaderPushConstants {
+    uint32_t dst_w;
+    uint32_t dst_h;
+    uint32_t _pad0[2];
+    float    m_r[4];
+    float    m_g[4];
+    float    m_b[4];
+    float    offset[4];
+};
+static_assert(sizeof(ShaderPushConstants) == 80, "PC size mismatch with shader");
+
+ColorMatrix make_color_matrix(ColorSpace cs, ColorRange cr) {
+    /* Coefficients are the standard ITU-R rec luma/chroma weights, with
+     * the limited-range Y/C scaling baked into the matrix so the shader
+     * only needs to subtract the offset and matmul. Reference:
+     *   BT.709: Kr=0.2126, Kb=0.0722
+     *   BT.601: Kr=0.299,  Kb=0.114
+     *   BT.2020 (NCL): Kr=0.2627, Kb=0.0593 (treated identically here —
+     *     no PQ / HLG support yet, so non-constant-luma BT.2020 is
+     *     close enough for SDR fallback).
+     */
+    ColorMatrix m {};
+    if (cr == ColorRange::Full) {
+        /* Full range: y_scale = 1.0, c_scale = 1.0; offsets = (0, -.5, -.5). */
+        if (cs == ColorSpace::Bt601) {
+            m.m_r[0] = 1.0f; m.m_r[1] = 0.0f;     m.m_r[2] = 1.402f;
+            m.m_g[0] = 1.0f; m.m_g[1] = -0.34414f; m.m_g[2] = -0.71414f;
+            m.m_b[0] = 1.0f; m.m_b[1] = 1.772f;   m.m_b[2] = 0.0f;
+        } else if (cs == ColorSpace::Bt2020) {
+            m.m_r[0] = 1.0f; m.m_r[1] = 0.0f;     m.m_r[2] = 1.4746f;
+            m.m_g[0] = 1.0f; m.m_g[1] = -0.16455f; m.m_g[2] = -0.57135f;
+            m.m_b[0] = 1.0f; m.m_b[1] = 1.8814f;  m.m_b[2] = 0.0f;
+        } else {
+            /* BT.709 default. */
+            m.m_r[0] = 1.0f; m.m_r[1] = 0.0f;     m.m_r[2] = 1.5748f;
+            m.m_g[0] = 1.0f; m.m_g[1] = -0.18732f; m.m_g[2] = -0.46812f;
+            m.m_b[0] = 1.0f; m.m_b[1] = 1.85563f; m.m_b[2] = 0.0f;
+        }
+        m.offset[0] = 0.0f;
+        m.offset[1] = -128.0f / 255.0f;
+        m.offset[2] = -128.0f / 255.0f;
+    } else {
+        /* Limited range. y_scale = 255/219; c_scale = 255/224.
+         * Pre-bake into matrix coefficients. */
+        constexpr float ys = 255.0f / 219.0f;
+        constexpr float cs_ = 255.0f / 224.0f;
+        if (cs == ColorSpace::Bt601) {
+            m.m_r[0] = ys; m.m_r[1] = 0.0f;        m.m_r[2] = 1.402f   * cs_;
+            m.m_g[0] = ys; m.m_g[1] = -0.34414f*cs_; m.m_g[2] = -0.71414f*cs_;
+            m.m_b[0] = ys; m.m_b[1] = 1.772f * cs_;  m.m_b[2] = 0.0f;
+        } else if (cs == ColorSpace::Bt2020) {
+            m.m_r[0] = ys; m.m_r[1] = 0.0f;          m.m_r[2] = 1.4746f * cs_;
+            m.m_g[0] = ys; m.m_g[1] = -0.16455f*cs_; m.m_g[2] = -0.57135f*cs_;
+            m.m_b[0] = ys; m.m_b[1] = 1.8814f * cs_; m.m_b[2] = 0.0f;
+        } else {
+            m.m_r[0] = ys; m.m_r[1] = 0.0f;          m.m_r[2] = 1.5748f * cs_;
+            m.m_g[0] = ys; m.m_g[1] = -0.18732f*cs_; m.m_g[2] = -0.46812f*cs_;
+            m.m_b[0] = ys; m.m_b[1] = 1.85563f*cs_;  m.m_b[2] = 0.0f;
+        }
+        m.offset[0] = -16.0f  / 255.0f;
+        m.offset[1] = -128.0f / 255.0f;
+        m.offset[2] = -128.0f / 255.0f;
+    }
+    return m;
+}
+
 namespace {
 
 bool fail(std::string* err, std::string m) {
@@ -284,12 +352,12 @@ bool YuvToRgba::init(VkInstance instance, VkPhysicalDevice phys, VkDevice device
             return fail(err, std::string("vkCreateDescriptorSetLayout: ") + vk_result_str(r));
     }
 
-    // ----- Pipeline layout (push constants for dst dims) -----
+    // ----- Pipeline layout (push constants: dst dims + color matrix) -----
     {
         VkPushConstantRange pcr {};
         pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         pcr.offset     = 0;
-        pcr.size       = sizeof(uint32_t) * 2;
+        pcr.size       = sizeof(ShaderPushConstants);
         VkPipelineLayoutCreateInfo pli {};
         pli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pli.setLayoutCount         = 1;
@@ -403,12 +471,13 @@ bool YuvToRgba::init(VkInstance instance, VkPhysicalDevice phys, VkDevice device
     return true;
 }
 
-int YuvToRgba::convert_nv12(VkImage         dst,
-                            uint32_t        dst_w,
-                            uint32_t        dst_h,
-                            const uint8_t*  nv12,
-                            size_t          nv12_size,
-                            std::string*    err) {
+int YuvToRgba::convert_nv12(VkImage             dst,
+                            uint32_t            dst_w,
+                            uint32_t            dst_h,
+                            const uint8_t*      nv12,
+                            size_t              nv12_size,
+                            const ColorMatrix&  cm,
+                            std::string*        err) {
     if (dst == VK_NULL_HANDLE) { fail(err, "convert_nv12: dst VkImage null"); return -1; }
     if (dst_w == 0 || dst_h == 0) { fail(err, "convert_nv12: dst_w/h zero"); return -1; }
     if ((dst_w & 1u) || (dst_h & 1u)) {
@@ -546,9 +615,16 @@ int YuvToRgba::convert_nv12(VkImage         dst,
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_, 0, 1, &dset_, 0, nullptr);
-    uint32_t pc[2] = { dst_w, dst_h };
+    ShaderPushConstants pc {};
+    pc.dst_w = dst_w; pc.dst_h = dst_h;
+    for (int i = 0; i < 3; ++i) {
+        pc.m_r[i]   = cm.m_r[i];
+        pc.m_g[i]   = cm.m_g[i];
+        pc.m_b[i]   = cm.m_b[i];
+        pc.offset[i] = cm.offset[i];
+    }
     vkCmdPushConstants(cmd_, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(pc), pc);
+                       0, sizeof(pc), &pc);
     const uint32_t gx = (dst_w + 7) / 8;
     const uint32_t gy = (dst_h + 7) / 8;
     vkCmdDispatch(cmd_, gx, gy, 1);
@@ -611,10 +687,11 @@ int YuvToRgba::convert_nv12(VkImage         dst,
 }
 
 int YuvToRgba::convert_av_vk_frame(const VkFrameImports& im,
-                                   VkImage      dst,
-                                   uint32_t     dst_w,
-                                   uint32_t     dst_h,
-                                   std::string* err) {
+                                   VkImage             dst,
+                                   uint32_t            dst_w,
+                                   uint32_t            dst_h,
+                                   const ColorMatrix&  cm,
+                                   std::string*        err) {
     if (dst == VK_NULL_HANDLE) { fail(err, "convert_av_vk_frame: dst null"); return -1; }
     if (im.y_image == VK_NULL_HANDLE || im.uv_image == VK_NULL_HANDLE) {
         fail(err, "convert_av_vk_frame: AVVkFrame missing Y or UV plane "
@@ -746,9 +823,16 @@ int YuvToRgba::convert_av_vk_frame(const VkFrameImports& im,
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_, 0, 1, &dset_, 0, nullptr);
-    uint32_t pc[2] = { dst_w, dst_h };
+    ShaderPushConstants pc {};
+    pc.dst_w = dst_w; pc.dst_h = dst_h;
+    for (int i = 0; i < 3; ++i) {
+        pc.m_r[i]   = cm.m_r[i];
+        pc.m_g[i]   = cm.m_g[i];
+        pc.m_b[i]   = cm.m_b[i];
+        pc.offset[i] = cm.offset[i];
+    }
     vkCmdPushConstants(cmd_, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(pc), pc);
+                       0, sizeof(pc), &pc);
     const uint32_t gx = (dst_w + 7) / 8;
     const uint32_t gy = (dst_h + 7) / 8;
     vkCmdDispatch(cmd_, gx, gy, 1);

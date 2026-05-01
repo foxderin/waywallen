@@ -30,6 +30,34 @@
 
 namespace waywallen::ffvk {
 
+// Coefficients for the YUV→RGB push constant. CPU side fills this from
+// the source frame's colorspace + range; the shader applies it as
+// `rgb = M * (ycbcr + offset)`.
+struct ColorMatrix {
+    float m_r[3];   // Y, Cb, Cr scalings producing R
+    float m_g[3];
+    float m_b[3];
+    float offset[3]; // subtracted from (Y, Cb, Cr) before matmul
+};
+
+// Mirrors FFmpeg's `enum AVColorSpace` for the cases we actually
+// branch on. Keeping our own enum avoids leaking <libavutil/pixfmt.h>
+// into headers consumed by plugins.
+enum class ColorSpace : uint32_t {
+    Bt709 = 0,    // default
+    Bt601 = 1,    // SMPTE 170M / BT.470BG
+    Bt2020 = 2,   // BT.2020 non-constant luma (treated as BT.709 for HDR-out-of-scope reasons)
+};
+
+enum class ColorRange : uint32_t {
+    Limited = 0,  // 16..235 / 16..240 (MPEG)
+    Full    = 1,  // 0..255 (JPEG)
+};
+
+// Derive the ColorMatrix to push to the shader. Defaults to BT.709
+// limited when either argument is the canonical "unknown" sentinel.
+ColorMatrix make_color_matrix(ColorSpace cs, ColorRange cr);
+
 class YuvToRgba {
 public:
     ~YuvToRgba();
@@ -57,12 +85,13 @@ public:
     // takes ownership of the fd. Returns -1 with `*err` populated on
     // failure. `dst_w`/`dst_h` must be ≤ the (max_w, max_h) passed to
     // create() and must be even.
-    int convert_nv12(VkImage         dst,
-                     uint32_t        dst_w,
-                     uint32_t        dst_h,
-                     const uint8_t*  nv12,
-                     size_t          nv12_size,
-                     std::string*    err);
+    int convert_nv12(VkImage             dst,
+                     uint32_t            dst_w,
+                     uint32_t            dst_h,
+                     const uint8_t*      nv12,
+                     size_t              nv12_size,
+                     const ColorMatrix&  cm,
+                     std::string*        err);
 
     // Zero-copy variant: import the Y/UV VkImages directly from an
     // AVVkFrame (DISABLE_MULTIPLANE-allocated). Waits on the supplied
@@ -95,10 +124,11 @@ public:
         uint32_t        src_h;
     };
     int convert_av_vk_frame(const VkFrameImports& imports,
-                            VkImage      dst,
-                            uint32_t     dst_w,
-                            uint32_t     dst_h,
-                            std::string* err);
+                            VkImage             dst,
+                            uint32_t            dst_w,
+                            uint32_t            dst_h,
+                            const ColorMatrix&  cm,
+                            std::string*        err);
 
 private:
     YuvToRgba() = default;

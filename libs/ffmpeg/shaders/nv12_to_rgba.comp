@@ -2,15 +2,16 @@
 
 // NV12 → RGBA8 conversion compute shader for the waywallen video plugin.
 //
-// Input:
-//   - y_tex   : 8-bit luma plane, sampled bilinearly at output coordinates.
-//   - uv_tex  : 8bpc 2-channel chroma plane at half resolution; the sampler
-//               handles the chroma-up bilinear filter for free.
-// Output:
-//   - dst     : RGBA8 image, full resolution.
-// Color math: BT.709 limited-range (the YUV color space all common
-// h264/h265 wallpaper sources sit in). BT.601 / full-range support comes
-// when we wire up AVFrame::colorspace inspection in a follow-up.
+// The YUV→RGB matrix and offset are pushed per-frame so the same
+// pipeline handles BT.601 / BT.709 / BT.2020 and limited / full range.
+// CPU side (libs/ffmpeg/src/yuv_to_rgba.cpp) picks the right values
+// from AVFrame::colorspace + AVFrame::color_range.
+//
+// Convention: ycbcr = vec3(Y, Cb, Cr) sampled in [0..1]; we add `offset`
+// (negative: e.g. -16/255 for limited Y, -128/255 for chroma center)
+// then dot against the three matrix rows to get linear-light RGB. The
+// scaling of the limited range (1/219 etc.) is folded into the matrix
+// coefficients on the CPU side.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -19,26 +20,25 @@ layout(set = 0, binding = 1) uniform sampler2D uv_tex;
 layout(set = 0, binding = 2, rgba8) uniform writeonly image2D dst;
 
 layout(push_constant) uniform PC {
-    uint dst_w;
-    uint dst_h;
+    uvec2 dst_size;       // 8 bytes
+    uvec2 _pad0;          // align mat rows to 16-byte boundary
+    vec4  m_r;            // {y, cb, cr, _} scaling Y/Cb/Cr → R
+    vec4  m_g;            // {y, cb, cr, _} → G
+    vec4  m_b;            // {y, cb, cr, _} → B
+    vec4  offset;         // {y_off, cb_off, cr_off, _} subtract before matmul
 } pc;
-
-const mat3 bt709_limited = mat3(
-    1.16438356,  1.16438356,  1.16438356,
-    0.0,        -0.21324861,  2.11240179,
-    1.79274107, -0.53290933,  0.0
-);
-const vec3 bt709_offset = vec3(-16.0/255.0, -128.0/255.0, -128.0/255.0);
 
 void main() {
     uvec2 px = gl_GlobalInvocationID.xy;
-    if (px.x >= pc.dst_w || px.y >= pc.dst_h) return;
+    if (px.x >= pc.dst_size.x || px.y >= pc.dst_size.y) return;
 
-    vec2 uv = (vec2(px) + 0.5) / vec2(pc.dst_w, pc.dst_h);
+    vec2 uv = (vec2(px) + 0.5) / vec2(pc.dst_size);
     float Y  = texture(y_tex,  uv).r;
     vec2  CC = texture(uv_tex, uv).rg;
 
-    vec3 ycbcr = vec3(Y, CC.r, CC.g) + bt709_offset;
-    vec3 rgb   = bt709_limited * ycbcr;
+    vec3 ycbcr = vec3(Y, CC.r, CC.g) + pc.offset.xyz;
+    vec3 rgb   = vec3(dot(ycbcr, pc.m_r.xyz),
+                      dot(ycbcr, pc.m_g.xyz),
+                      dot(ycbcr, pc.m_b.xyz));
     imageStore(dst, ivec2(px), vec4(clamp(rgb, 0.0, 1.0), 1.0));
 }

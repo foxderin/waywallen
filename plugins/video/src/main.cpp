@@ -431,6 +431,11 @@ int main(int argc, char** argv) {
 
         std::string yerr;
         int sync_fd = -1;
+        const uint32_t cs_id = decoder->using_vk_frames() ? vkv.colorspace : frame.colorspace;
+        const uint32_t cr_id = decoder->using_vk_frames() ? vkv.color_range : frame.color_range;
+        const auto color_matrix = waywallen::ffvk::make_color_matrix(
+            static_cast<waywallen::ffvk::ColorSpace>(cs_id),
+            static_cast<waywallen::ffvk::ColorRange>(cr_id));
         if (decoder->using_vk_frames()) {
             waywallen::ffvk::YuvToRgba::VkFrameImports im {};
             im.y_image          = vkv.img[0];
@@ -450,12 +455,13 @@ int main(int argc, char** argv) {
             im.src_h            = vkv.height;
             sync_fd = yuv->convert_av_vk_frame(
                 im, reinterpret_cast<VkImage>(s.vk_image),
-                s.width, s.height, &yerr);
+                s.width, s.height, color_matrix, &yerr);
         } else {
             sync_fd = yuv->convert_nv12(
                 reinterpret_cast<VkImage>(s.vk_image),
                 s.width, s.height,
-                frame.data.data(), frame.data.size(), &yerr);
+                frame.data.data(), frame.data.size(),
+                color_matrix, &yerr);
         }
         if (sync_fd < 0) {
             std::fprintf(stderr,
