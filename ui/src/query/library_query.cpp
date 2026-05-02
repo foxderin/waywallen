@@ -33,6 +33,7 @@ void LibraryListQuery::reload() {
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [](const proto::Response& rsp) {
             if (auto* lm = LibraryManager::instance()) {
@@ -81,6 +82,7 @@ void LibraryAddQuery::reload() {
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [](const proto::Response&) {});
         co_return;
@@ -106,6 +108,7 @@ void LibraryAutoDetectQuery::reload() {
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
             auto added = static_cast<qint32>(rsp.libraryAutoDetect().added().size());
@@ -147,6 +150,7 @@ void LibraryRemoveQuery::reload() {
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [](const proto::Response&) {});
         co_return;

@@ -54,6 +54,7 @@ void WallpaperListQuery::reload() {
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
             const auto&                   list_rsp = rsp.wallpaperList();
@@ -95,6 +96,7 @@ void WallpaperListQuery::fetchMore(qint32) {
     spawn([self, backend, req = std::move(req), next_offset]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [self, next_offset](const proto::Response& rsp) {
             const auto&                   list_rsp = rsp.wallpaperList();
@@ -139,6 +141,7 @@ void WallpaperScanQuery::reload() {
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
             self->m_count = rsp.wallpaperScan().count();
@@ -206,6 +209,7 @@ void WallpaperApplyQuery::reload() {
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
             self->m_renderer_id = rsp.wallpaperApply().rendererId();
