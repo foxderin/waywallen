@@ -1,6 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Templates as T
 import QtQuick.Layouts
 import Qcm.Material as MD
 
@@ -96,8 +96,8 @@ ColumnLayout {
             name: MD.Token.icon.restart_alt
             size: 16
             color: MD.Token.color.on_surface_variant
-            ToolTip.visible: hovered.hovered
-            ToolTip.text: "Requires renderer restart"
+            T.ToolTip.visible: hovered.hovered
+            T.ToolTip.text: "Requires renderer restart"
 
             HoverHandler {
                 id: hovered
@@ -162,7 +162,7 @@ ColumnLayout {
                 from: parent.lo
                 to: parent.hi
                 stepSize: root._stepFor()
-                snapMode: Slider.SnapAlways
+                snapMode: T.Slider.SnapAlways
                 value: root._toFloat(root.value, parent.lo)
                 onMoved: {
                     if (root.schema.type === root.kU32) {
