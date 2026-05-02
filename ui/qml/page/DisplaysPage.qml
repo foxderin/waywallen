@@ -423,6 +423,7 @@ MD.Page {
                     // for this display in one round-trip. Only shown
                     // when at least one field is actually overridden.
                     MD.IconButton {
+                        mdState.size: MD.Enum.XS
                         visible: {
                             if (! root.selected) return false;
                             const ovr = root.selected.layoutOverride || ({});

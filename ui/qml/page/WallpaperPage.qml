@@ -61,6 +61,11 @@ MD.Page {
 
     property var selectedWallpaper: null
 
+    // Index into rendererCandidates; reset to 0 whenever the candidate
+    // list changes (selection or registry update).
+    property int rendererIndex: 0
+    onRendererCandidatesChanged: rendererIndex = 0
+
     // Target display ids for Apply. Empty set = "All displays".
     property var applyTargetIds: []
     function isTargetAll() {
@@ -233,36 +238,41 @@ MD.Page {
             padding: 0
             showBackground: true
 
-            contentItem: MD.Flickable {
-                id: m_detail_flick
-                contentHeight: m_detail_col.implicitHeight
+            contentItem: ColumnLayout {
+                spacing: 0
 
-                ColumnLayout {
-                    id: m_detail_col
-                    width: m_detail_flick.width
-                    spacing: 0
+                MD.Flickable {
+                    id: m_detail_flick
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    contentHeight: m_detail_col.implicitHeight
 
-                    // Preview
-                    W.ThumbnailImage {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: visible ? 200 : 0
-                        Layout.margins: 12
-                        visible: (root.selectedWallpaper?.preview ?? "") !== ""
-                                 || (root.selectedWallpaper?.wpType === "video"
-                                     && (root.selectedWallpaper?.resource ?? "") !== "")
-                        source  : root.selectedWallpaper?.preview ?? ""
-                        resource: root.selectedWallpaper?.resource ?? ""
-                        wpType  : root.selectedWallpaper?.wpType ?? ""
-                        fillMode: Image.PreserveAspectFit
-                    }
-
-                    // Info section
                     ColumnLayout {
-                        Layout.fillWidth: true
-                        Layout.leftMargin: 16
-                        Layout.rightMargin: 16
-                        Layout.bottomMargin: 16
-                        spacing: 12
+                        id: m_detail_col
+                        width: m_detail_flick.width
+                        spacing: 0
+
+                        // Preview
+                        W.ThumbnailImage {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: visible ? 200 : 0
+                            Layout.margins: 12
+                            visible: (root.selectedWallpaper?.preview ?? "") !== ""
+                                     || (root.selectedWallpaper?.wpType === "video"
+                                         && (root.selectedWallpaper?.resource ?? "") !== "")
+                            source  : root.selectedWallpaper?.preview ?? ""
+                            resource: root.selectedWallpaper?.resource ?? ""
+                            wpType  : root.selectedWallpaper?.wpType ?? ""
+                            fillMode: Image.PreserveAspectFit
+                        }
+
+                        // Info section
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 16
+                            Layout.rightMargin: 16
+                            Layout.bottomMargin: 16
+                            spacing: 12
 
                         // Close button row
                         RowLayout {
@@ -407,6 +417,7 @@ MD.Page {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 4
+                            visible: (W.App.displayManager.displays || []).length > 0
 
                             MD.Text {
                                 text: "Apply to"
@@ -439,7 +450,8 @@ MD.Page {
 
                         // Renderer pick — only shown when the wallpaper
                         // type has more than one registered renderer.
-                        // Defaults to the highest-priority one (index 0).
+                        // Single-select chip row; defaults to the highest-
+                        // priority candidate (index 0).
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 4
@@ -451,62 +463,84 @@ MD.Page {
                                 color: MD.Token.color.on_surface_variant
                             }
 
-                            MD.ComboBox {
-                                id: rendererBox
+                            Flow {
                                 Layout.fillWidth: true
-                                model: root.rendererCandidates
-                                textRole: "name"
-                                currentIndex: 0
-                            }
-                        }
+                                spacing: 6
 
-                        // Apply button — disabled when no display is
-                        // registered (daemon would reject the call with
-                        // FailedPrecondition anyway).
-                        MD.BusyButton {
-                            id: applyBtn
-                            Layout.fillWidth: true
-                            text: "Apply"
-                            busy: applyQuery.querying
-                            mdState.type: MD.Enum.BtFilled
-                            enabled: (W.App.displayManager.displays || []).length > 0
+                                Repeater {
+                                    model: root.rendererCandidates
 
-                            T.ToolTip.visible: hovered && !enabled
-                            T.ToolTip.text: "No display connected"
-
-                            onClicked: {
-                                if (busy)
-                                    return;
-
-                                if (!root.selectedWallpaper)
-                                    return;
-                                applyQuery.wallpaper = root.selectedWallpaper;
-                                applyQuery.displayIds = root.applyTargetIds;
-                                if (root.rendererCandidates.length >= 2) {
-                                    const pick = root.rendererCandidates[rendererBox.currentIndex];
-                                    applyQuery.rendererName = pick ? (pick.name || "") : "";
-                                } else {
-                                    applyQuery.rendererName = "";
+                                    MD.FilterChip {
+                                        required property var modelData
+                                        required property int index
+                                        text: modelData?.name || ""
+                                        checked: root.rendererIndex === index
+                                        onClicked: root.rendererIndex = index
+                                    }
                                 }
-                                applyQuery.reload();
                             }
                         }
 
-                        // Status
-                        RowLayout {
-                            visible: applyQuery.status === 3
-                            spacing: 8
+                        }
+                    }
+                }
 
-                            MD.Icon {
-                                name: MD.Token.icon.check
-                                size: 20
-                                color: MD.Token.color.primary
+                // Apply controls — sit outside the Flickable so they remain
+                // visible regardless of how far the detail content scrolls.
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    Layout.topMargin: 8
+                    Layout.bottomMargin: 16
+                    spacing: 12
+
+                    // Apply button — disabled when no display is
+                    // registered (daemon would reject the call with
+                    // FailedPrecondition anyway).
+                    MD.BusyButton {
+                        id: applyBtn
+                        Layout.fillWidth: true
+                        text: "Apply"
+                        busy: applyQuery.querying
+                        mdState.type: MD.Enum.BtFilled
+                        enabled: (W.App.displayManager.displays || []).length > 0
+
+                        T.ToolTip.visible: hovered && !enabled
+                        T.ToolTip.text: "No display connected"
+
+                        onClicked: {
+                            if (busy)
+                                return;
+
+                            if (!root.selectedWallpaper)
+                                return;
+                            applyQuery.wallpaper = root.selectedWallpaper;
+                            applyQuery.displayIds = root.applyTargetIds;
+                            if (root.rendererCandidates.length >= 2) {
+                                const pick = root.rendererCandidates[root.rendererIndex];
+                                applyQuery.rendererName = pick ? (pick.name || "") : "";
+                            } else {
+                                applyQuery.rendererName = "";
                             }
-                            MD.Text {
-                                text: "Applied"
-                                typescale: MD.Token.typescale.label_large
-                                color: MD.Token.color.primary
-                            }
+                            applyQuery.reload();
+                        }
+                    }
+
+                    // Status
+                    RowLayout {
+                        visible: applyQuery.status === 3
+                        spacing: 8
+
+                        MD.Icon {
+                            name: MD.Token.icon.check
+                            size: 20
+                            color: MD.Token.color.primary
+                        }
+                        MD.Text {
+                            text: "Applied"
+                            typescale: MD.Token.typescale.label_large
+                            color: MD.Token.color.primary
                         }
                     }
                 }
