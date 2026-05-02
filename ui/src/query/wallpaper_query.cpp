@@ -170,6 +170,14 @@ void WallpaperApplyQuery::setDisplayIds(const QVariantList& v) {
     }
 }
 
+auto WallpaperApplyQuery::rendererName() const -> const QString& { return m_renderer_name; }
+void WallpaperApplyQuery::setRendererName(const QString& v) {
+    if (m_renderer_name != v) {
+        m_renderer_name = v;
+        Q_EMIT rendererNameChanged();
+    }
+}
+
 auto WallpaperApplyQuery::rendererId() const -> const QString& { return m_renderer_id; }
 
 void WallpaperApplyQuery::reload() {
@@ -191,6 +199,7 @@ void WallpaperApplyQuery::reload() {
         if (ok) ids.append(id);
     }
     inner.setDisplayIds(ids);
+    inner.setRendererName(m_renderer_name);
     req.setWallpaperApply(std::move(inner));
 
     auto self = QWatcher { this };

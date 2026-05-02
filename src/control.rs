@@ -102,6 +102,7 @@ async fn apply_wallpaper_inner(
         height,
         fps,
         test_pattern: false,
+        renderer_name: None,
     };
     let renderer_id = app.renderer_manager.spawn(spawn_req).await?;
     if let Some(handle) = app.renderer_manager.get(&renderer_id).await {

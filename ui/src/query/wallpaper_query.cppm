@@ -65,6 +65,9 @@ export class WallpaperApplyQuery : public Query, public QueryExtra<control::v1::
     Q_PROPERTY(waywallen::model::Wallpaper wallpaper READ wallpaper WRITE setWallpaper NOTIFY wallpaperChanged FINAL)
     /// Target display ids. Empty list = "apply to all displays" (legacy default).
     Q_PROPERTY(QVariantList displayIds READ displayIds WRITE setDisplayIds NOTIFY displayIdsChanged FINAL)
+    /// Optional renderer plugin name. Empty (default) lets the daemon pick
+    /// the highest-priority renderer for this wallpaper's type.
+    Q_PROPERTY(QString rendererName READ rendererName WRITE setRendererName NOTIFY rendererNameChanged FINAL)
     Q_PROPERTY(QString rendererId READ rendererId NOTIFY rendererIdChanged FINAL)
 
 public:
@@ -76,17 +79,22 @@ public:
     auto displayIds() const -> const QVariantList&;
     void setDisplayIds(const QVariantList&);
 
+    auto rendererName() const -> const QString&;
+    void setRendererName(const QString&);
+
     auto rendererId() const -> const QString&;
 
     void reload() override;
 
     Q_SIGNAL void wallpaperChanged();
     Q_SIGNAL void displayIdsChanged();
+    Q_SIGNAL void rendererNameChanged();
     Q_SIGNAL void rendererIdChanged();
 
 private:
     model::Wallpaper m_wallpaper;
     QVariantList     m_display_ids;
+    QString          m_renderer_name;
     QString          m_renderer_id;
 };
 

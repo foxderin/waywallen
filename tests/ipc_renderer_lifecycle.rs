@@ -33,6 +33,7 @@ async fn spawn_control_kill_roundtrip() {
         height: 240,
         fps: 15,
         test_pattern: false,
+        renderer_name: None,
     };
     let id = mgr.spawn(req).await.expect("spawn");
     assert!(!id.is_empty());

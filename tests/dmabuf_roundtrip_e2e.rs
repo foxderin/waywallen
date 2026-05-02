@@ -284,6 +284,7 @@ async fn run_one_pair(
         height: 360,
         fps: 30,
         test_pattern: false,
+        renderer_name: None,
     };
     let spawn_res = mgr.spawn(req).await;
     std::env::remove_var("WAYWALLEN_IMAGE_DUMP_DIR");

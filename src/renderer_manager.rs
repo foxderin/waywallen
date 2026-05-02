@@ -52,6 +52,12 @@ pub struct SpawnRequest {
     /// full daemon/display pipeline before a real Wallpaper Engine
     /// assets directory is available (see plan.md I4).
     pub test_pattern: bool,
+    /// Optional explicit renderer plugin name. `None` (default) lets
+    /// `spawn` and `find_reusable` pick the highest-priority renderer
+    /// for `wp_type`; `Some(name)` pins both to that exact plugin so a
+    /// user-chosen non-default renderer isn't transparently swapped
+    /// for the priority winner on reuse or fresh spawn.
+    pub renderer_name: Option<String>,
 }
 
 /// Snapshot of the most recent `BindBuffers` event, plus the DMA-BUF FDs
@@ -501,11 +507,18 @@ impl RendererManager {
         // the connection survives unlink(2).
         let _cleanup = TempUnlink(sock_path.clone());
 
-        let renderer_def = self
-            .registry
-            .resolve(&req.wp_type)
-            .ok_or_else(|| anyhow!("no renderer registered for type '{}'", req.wp_type))?
-            .clone();
+        let renderer_def = match req.renderer_name.as_deref() {
+            Some(name) => self
+                .registry
+                .resolve_by_name(name)
+                .ok_or_else(|| anyhow!("unknown renderer '{}'", name))?
+                .clone(),
+            None => self
+                .registry
+                .resolve(&req.wp_type)
+                .ok_or_else(|| anyhow!("no renderer registered for type '{}'", req.wp_type))?
+                .clone(),
+        };
 
         // Build the Init message *before* spawning the child so a
         // schema-validation error fails fast (no fork(), no orphan
@@ -722,7 +735,10 @@ impl RendererManager {
         &self,
         req: &SpawnRequest,
     ) -> Option<(RendererId, HashMap<String, String>, Option<u32>)> {
-        let def = self.registry.resolve(&req.wp_type)?.clone();
+        let def = match req.renderer_name.as_deref() {
+            Some(name) => self.registry.resolve_by_name(name)?.clone(),
+            None => self.registry.resolve(&req.wp_type)?.clone(),
+        };
         let req_identity = identity_view(req, &def);
         let req_runtime = runtime_view(req, &def);
 
@@ -1616,6 +1632,7 @@ mod init_handshake_tests {
             height: 1080,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         let msg = build_init_msg(&req, &def_legacy("wescene-renderer")).expect("ok");
         match msg {
@@ -1666,6 +1683,7 @@ mod init_handshake_tests {
             height: 600,
             fps: 60,
             test_pattern: true,
+            renderer_name: None,
         };
         let msg = build_init_msg(&req, &def_legacy("waywallen-mpv")).expect("ok");
         match msg {
@@ -1701,6 +1719,7 @@ mod init_handshake_tests {
             height: 720,
             fps: 60,
             test_pattern: false,
+            renderer_name: None,
         };
         let msg = build_init_msg(&req, &def_scene_schema()).expect("ok");
         match msg {
@@ -1739,6 +1758,7 @@ mod init_handshake_tests {
             height: 600,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         let err = build_init_msg(&req, &def_scene_schema())
             .expect_err("must error on missing path");
@@ -1762,6 +1782,7 @@ mod init_handshake_tests {
             height: 1080,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         let msg = build_init_msg(&req, &def_mpv_schema()).expect("ok");
         match msg {
@@ -1817,6 +1838,7 @@ mod init_handshake_tests {
             height: 600,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         let init = build_init_msg(&req, &def_legacy("wescene-renderer")).expect("ok");
         let err = run_init_handshake(&daemon, &init)
@@ -1876,6 +1898,7 @@ mod reuse_tests {
             height: 1080,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         let id = identity_view(&req, &def);
         // `path` is identity (resource primary); loop_file/hwdec are
@@ -1915,6 +1938,7 @@ mod reuse_tests {
             height: 1080,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         let id = identity_view(&req, &def);
         assert_eq!(id.get("scene").map(|s| s.as_str()), Some("/wp.pkg"));
@@ -1978,6 +2002,7 @@ mod reuse_tests {
             height: 1080,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         let (id, delta, fps_change) = mgr
             .find_reusable(&req)
@@ -2033,6 +2058,7 @@ mod reuse_tests {
             height: 1080,
             fps: 30,
             test_pattern: false,
+            renderer_name: None,
         };
         assert!(
             mgr.find_reusable(&req).await.is_none(),

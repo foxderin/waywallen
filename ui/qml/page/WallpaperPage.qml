@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 pragma ValueTypeBehavior: Assertable
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Templates as T
 import Qcm.Material as MD
 import waywallen.ui as W
 
@@ -37,8 +38,25 @@ MD.Page {
         id: applyQuery
     }
 
+    W.RendererPluginListQuery {
+        id: pluginQuery
+        Component.onCompleted: reload()
+    }
+
     W.LibraryAutoDetectQuery {
         id: autoDetectQuery
+    }
+
+    // Renderers that advertise the selected wallpaper's wp_type, sorted
+    // by descending priority. Recomputed on selection or registry change.
+    readonly property var rendererCandidates: {
+        const wp = root.selectedWallpaper;
+        if (!wp) return [];
+        const t = wp.wpType || "";
+        if (!t) return [];
+        const list = (pluginQuery.renderers || []).filter(r => (r.types || []).indexOf(t) >= 0);
+        list.sort((a, b) => (b.priority || 0) - (a.priority || 0));
+        return list;
     }
 
     property var selectedWallpaper: null
@@ -419,12 +437,42 @@ MD.Page {
                             }
                         }
 
-                        // Apply button
+                        // Renderer pick — only shown when the wallpaper
+                        // type has more than one registered renderer.
+                        // Defaults to the highest-priority one (index 0).
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            visible: root.rendererCandidates.length >= 2
+
+                            MD.Text {
+                                text: "Renderer"
+                                typescale: MD.Token.typescale.label_medium
+                                color: MD.Token.color.on_surface_variant
+                            }
+
+                            MD.ComboBox {
+                                id: rendererBox
+                                Layout.fillWidth: true
+                                model: root.rendererCandidates
+                                textRole: "name"
+                                currentIndex: 0
+                            }
+                        }
+
+                        // Apply button — disabled when no display is
+                        // registered (daemon would reject the call with
+                        // FailedPrecondition anyway).
                         MD.BusyButton {
+                            id: applyBtn
                             Layout.fillWidth: true
                             text: "Apply"
                             busy: applyQuery.querying
                             mdState.type: MD.Enum.BtFilled
+                            enabled: (W.App.displayManager.displays || []).length > 0
+
+                            T.ToolTip.visible: hovered && !enabled
+                            T.ToolTip.text: "No display connected"
 
                             onClicked: {
                                 if (busy)
@@ -434,6 +482,12 @@ MD.Page {
                                     return;
                                 applyQuery.wallpaper = root.selectedWallpaper;
                                 applyQuery.displayIds = root.applyTargetIds;
+                                if (root.rendererCandidates.length >= 2) {
+                                    const pick = root.rendererCandidates[rendererBox.currentIndex];
+                                    applyQuery.rendererName = pick ? (pick.name || "") : "";
+                                } else {
+                                    applyQuery.rendererName = "";
+                                }
                                 applyQuery.reload();
                             }
                         }

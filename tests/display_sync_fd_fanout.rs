@@ -147,6 +147,7 @@ async fn two_displays_both_get_real_sync_fds() {
             height: 480,
             fps: 60,
             test_pattern: false,
+            renderer_name: None,
         })
         .await;
     let renderer_id = match spawn_res {

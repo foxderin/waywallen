@@ -505,6 +505,7 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 height: r.height,
                 fps: r.fps,
                 test_pattern: false,
+                renderer_name: None,
             };
             match state.renderer_manager.spawn(spawn_req).await {
                 Ok(id) => {
@@ -790,18 +791,48 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                     format!("wallpaper '{}' not found", r.wallpaper_id),
                 );
             };
-            if state
-                .renderer_manager
-                .registry()
-                .resolve(&entry.wp_type)
-                .is_none()
-            {
+            if state.router.display_count().await == 0 {
                 return error_response(
                     rid,
-                    pb::Status::InvalidArgument,
-                    format!("no renderer for wallpaper type '{}'", entry.wp_type),
+                    pb::Status::FailedPrecondition,
+                    "no display registered".into(),
                 );
             }
+            // Renderer pick: empty renderer_name uses priority resolve
+            // (current behaviour); explicit name must match a registered
+            // renderer that supports this wallpaper's type.
+            let registry = state.renderer_manager.registry();
+            let plugin_name: String = if r.renderer_name.is_empty() {
+                match registry.resolve(&entry.wp_type) {
+                    Some(def) => def.name.clone(),
+                    None => {
+                        return error_response(
+                            rid,
+                            pb::Status::InvalidArgument,
+                            format!("no renderer for wallpaper type '{}'", entry.wp_type),
+                        );
+                    }
+                }
+            } else {
+                let Some(def) = registry.resolve_by_name(&r.renderer_name) else {
+                    return error_response(
+                        rid,
+                        pb::Status::NotFound,
+                        format!("unknown renderer '{}'", r.renderer_name),
+                    );
+                };
+                if !def.types.iter().any(|t| t == &entry.wp_type) {
+                    return error_response(
+                        rid,
+                        pb::Status::InvalidArgument,
+                        format!(
+                            "renderer '{}' does not support wallpaper type '{}'",
+                            r.renderer_name, entry.wp_type
+                        ),
+                    );
+                }
+                def.name.clone()
+            };
             // Resolution comes from settings.global. fps is a per-plugin
             // concern: pulled out of `[plugin.<name>].fps` if present,
             // otherwise hardcoded to 30 as a safe last resort. The
@@ -811,15 +842,9 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
             let width = g.default_width;
             let height = g.default_height;
 
-            let plugin_name = state
-                .renderer_manager
-                .registry()
-                .resolve(&entry.wp_type)
-                .map(|def| def.name.clone());
-
-            let plugin_kv = plugin_name
-                .as_deref()
-                .and_then(|n| state.settings.plugin(n))
+            let plugin_kv = state
+                .settings
+                .plugin(&plugin_name)
                 .unwrap_or_default();
             // Read the typed `fps` spawn field out of plugin kv if
             // present, defaulting to 30. Step 4 of the renderer-Init
@@ -843,6 +868,14 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 height,
                 fps,
                 test_pattern: false,
+                // Pin reuse + spawn to the explicit pick when the
+                // request named one; otherwise let the manager fall
+                // back to priority resolve (legacy behaviour).
+                renderer_name: if r.renderer_name.is_empty() {
+                    None
+                } else {
+                    Some(plugin_name.clone())
+                },
             };
 
             // Reuse an existing renderer if its identity matches

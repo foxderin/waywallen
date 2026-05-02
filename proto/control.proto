@@ -104,6 +104,7 @@ enum Status {
   INVALID_ARGUMENT = 2;
   NOT_FOUND = 3;
   INTERNAL = 4;
+  FAILED_PRECONDITION = 5;
 }
 
 message Empty {}
@@ -269,6 +270,11 @@ message WallpaperApplyRequest {
   // resolved from settings (global default + plugin overrides), not from
   // this request.
   repeated uint64 display_ids = 5;
+  // Optional renderer plugin name. Empty (default) lets the daemon pick
+  // the highest-priority renderer registered for the wallpaper's type.
+  // Non-empty selects that exact renderer; the daemon validates that it
+  // is registered AND advertises this wallpaper's type.
+  string renderer_name = 6;
 }
 message WallpaperApplyResponse {
   string renderer_id = 1;

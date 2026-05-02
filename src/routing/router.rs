@@ -23,15 +23,18 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, broadcast::error::RecvError, mpsc, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 
-/// Backstop only. The mainline path is `Router::reap_orphans`, which
-/// is called from every `relink_*` mutation and synchronously kills
-/// any renderer that just lost its last link. This timeout exists
-/// purely to catch renderers that somehow ended up paused without
-/// going through the apply path (defensive — should never fire in
-/// practice).
+/// Backstop only. The mainline path is `Router::mark_orphan`, which
+/// schedules a per-renderer timer when a renderer loses its last
+/// enabled link. This timeout exists purely to catch renderers that
+/// somehow ended up paused without going through the orphan-marking
+/// path (defensive — should never fire in practice).
 const IDLE_KILL_TIMEOUT: Duration = Duration::from_secs(3600);
 /// How often the backstop reaper task wakes up to scan for stragglers.
 const IDLE_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// Grace period an orphan renderer keeps running before it is killed.
+/// Display hot-replug or a fresh `WallpaperApply` within the window
+/// cancels the timer and keeps the renderer alive.
+const ORPHAN_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 use crate::display_layout::{self, FillMode, LayoutInput};
 use crate::ipc::proto::{ControlMsg, EventMsg};
@@ -226,6 +229,11 @@ struct Inner {
     /// Timestamp of the Pause transition for each paused renderer.
     /// Consumed by the reaper task to enforce `IDLE_KILL_TIMEOUT`.
     paused_since: HashMap<RendererId, Instant>,
+    /// Pending orphan-reap timers, keyed by renderer id. Inserted by
+    /// `mark_orphan` and cleared by `cancel_orphan_timer`. The task
+    /// itself also clears its own entry once it commits to the kill
+    /// path so a re-mark after wake-up reschedules cleanly.
+    orphan_timers: HashMap<RendererId, JoinHandle<()>>,
     next_display_id: u64,
     next_config_generation: u64,
 }
@@ -255,6 +263,7 @@ impl Router {
                 renderer_tasks: HashMap::new(),
                 paused_renderers: std::collections::HashSet::new(),
                 paused_since: HashMap::new(),
+                orphan_timers: HashMap::new(),
                 next_display_id: 0,
                 next_config_generation: 0,
             }),
@@ -519,6 +528,9 @@ impl Router {
             if let Some(task) = inner.renderer_tasks.remove(id) {
                 task.abort();
             }
+            if let Some(task) = inner.orphan_timers.remove(id) {
+                task.abort();
+            }
             inner.paused_renderers.remove(id);
             inner.paused_since.remove(id);
             removed.into_iter().map(|(_, did)| did).collect()
@@ -544,7 +556,7 @@ impl Router {
         reg: DisplayRegistration,
     ) -> DisplayHandle {
         let (tx, rx) = mpsc::unbounded_channel();
-        let display_id = {
+        let (display_id, auto_linked) = {
             let mut inner = self.inner.lock().await;
             inner.next_display_id += 1;
             let id = inner.next_display_id;
@@ -569,11 +581,17 @@ impl Router {
                 },
             );
             // Phase 1 policy: auto-link to whichever renderer is "first".
-            if let Some(rid) = inner.table.first_renderer() {
+            let auto = inner.table.first_renderer();
+            if let Some(rid) = auto.clone() {
                 inner.table.add_link(rid, id);
             }
-            id
+            (id, auto)
         };
+        // A freshly auto-linked renderer just gained an audience —
+        // cancel any pending orphan timer so it survives.
+        if let Some(rid) = auto_linked.as_deref() {
+            self.cancel_orphan_timer(rid).await;
+        }
         self.sync_display(display_id).await;
         self.reconcile_lifecycle().await;
         self.reconcile_buffer_flags().await;
@@ -589,6 +607,11 @@ impl Router {
             inner.displays.remove(&display_id);
             inner.table.remove_display(display_id);
         }
+        // Any renderer that just lost its last link enters the 5s
+        // grace window. `keep = None` because there's no
+        // newly-applied renderer to preserve here — every newly
+        // orphaned renderer is fair game.
+        self.mark_orphans(None).await;
         self.reconcile_lifecycle().await;
         self.reconcile_buffer_flags().await;
         self.emit(RouterEvent::DisplayRemoved(display_id));
@@ -716,17 +739,23 @@ impl Router {
         self.events_tx.subscribe()
     }
 
-    /// Walk every renderer in the table and kill the ones that no
-    /// longer have any enabled link, **except** any id in `keep`. Used
-    /// by the apply path to reclaim renderers that were just unlinked
-    /// — and to preserve the just-applied renderer in the 0-display
-    /// case where it has no links yet but should still hang around for
-    /// the next display hotplug.
+    /// Number of currently registered displays. Cheap (O(1) on the
+    /// inner displays map) read used by the apply path to gate
+    /// `WallpaperApply` when nothing would observe a fresh spawn.
+    pub async fn display_count(self: &Arc<Self>) -> usize {
+        self.inner.lock().await.displays.len()
+    }
+
+    /// Walk every renderer in the table and schedule a 5s reap timer
+    /// for any that have no enabled link, **except** any id in
+    /// `keep`. Used by the apply path to reclaim renderers that just
+    /// lost their last link — and to preserve the just-applied
+    /// renderer in the 0-display case where it has no links yet but
+    /// should still hang around for the next display hotplug.
     ///
-    /// Returns the list of ids that were actually killed (useful for
-    /// log lines and tests).
-    pub async fn reap_orphans(self: &Arc<Self>, keep: Option<&str>) -> Vec<RendererId> {
-        let victims: Vec<RendererId> = {
+    /// Returns the list of ids whose timers were scheduled.
+    pub async fn mark_orphans(self: &Arc<Self>, keep: Option<&str>) -> Vec<RendererId> {
+        let candidates: Vec<RendererId> = {
             let inner = self.inner.lock().await;
             inner
                 .table
@@ -744,14 +773,73 @@ impl Router {
                 })
                 .collect()
         };
-        for rid in &victims {
-            log::info!("router: reaping orphan renderer {rid}");
-            self.unregister_renderer(rid).await;
-            if let Err(e) = self.mgr.kill(rid).await {
-                log::warn!("router: kill orphan {rid}: {e}");
-            }
+        for rid in &candidates {
+            self.mark_orphan(rid.clone()).await;
         }
-        victims
+        if let Some(k) = keep {
+            self.cancel_orphan_timer(k).await;
+        }
+        candidates
+    }
+
+    /// Schedule a 5s timer that reaps `renderer_id` if it is still an
+    /// orphan when the timer fires. Re-marking the same id aborts the
+    /// existing timer and starts a fresh one (idempotent + restarts
+    /// the grace window).
+    pub async fn mark_orphan(self: &Arc<Self>, renderer_id: RendererId) {
+        let weak = Arc::downgrade(self);
+        let rid_for_task = renderer_id.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(ORPHAN_REAP_TIMEOUT).await;
+            let Some(this) = weak.upgrade() else { return };
+            this.fire_orphan_reap(&rid_for_task).await;
+        });
+        let mut inner = self.inner.lock().await;
+        if let Some(prev) = inner.orphan_timers.insert(renderer_id.clone(), task) {
+            prev.abort();
+        }
+        log::debug!("router: orphan timer scheduled for {renderer_id} ({:?})", ORPHAN_REAP_TIMEOUT);
+    }
+
+    /// Cancel a pending orphan-reap timer for `renderer_id` (if any).
+    /// Called from `register_display` / link-success paths so a
+    /// renderer that just re-acquired an audience survives.
+    pub async fn cancel_orphan_timer(self: &Arc<Self>, renderer_id: &str) {
+        let removed = self.inner.lock().await.orphan_timers.remove(renderer_id);
+        if let Some(task) = removed {
+            task.abort();
+            log::debug!("router: orphan timer cancelled for {renderer_id}");
+        }
+    }
+
+    /// Timer body: re-check the orphan condition under the lock and
+    /// kill if it still holds. Always clears the timer entry from the
+    /// map before unregistering (which itself touches the lock).
+    async fn fire_orphan_reap(self: &Arc<Self>, renderer_id: &str) {
+        let still_orphan = {
+            let mut inner = self.inner.lock().await;
+            // Drop our own entry first so a concurrent re-mark sees an
+            // empty slot and schedules a fresh timer.
+            inner.orphan_timers.remove(renderer_id);
+            // Renderer might have been removed via `unregister_renderer`
+            // already (manual kill, etc.) — bail in that case.
+            if !inner.table.renderer_ids().iter().any(|r| r == renderer_id) {
+                return;
+            }
+            inner
+                .table
+                .links_for_renderer(renderer_id)
+                .iter()
+                .all(|l| !l.enabled)
+        };
+        if !still_orphan {
+            return;
+        }
+        log::info!("router: reaping orphan renderer {renderer_id} after grace");
+        self.unregister_renderer(renderer_id).await;
+        if let Err(e) = self.mgr.kill(renderer_id).await {
+            log::warn!("router: kill orphan {renderer_id}: {e}");
+        }
     }
 
     /// Fire an event to all subscribers. Send errors (no subscribers)
@@ -917,10 +1005,10 @@ impl Router {
         }
         self.reconcile_lifecycle().await;
         // See `relink_all_displays_to` for the GC rationale. We always
-        // run the reap pass so that switching one display away from a
-        // renderer that no other display still uses immediately frees
-        // its GPU resources.
-        self.reap_orphans(Some(new_renderer_id)).await;
+        // run the mark pass so that switching one display away from a
+        // renderer that no other display still uses starts the orphan
+        // grace timer immediately.
+        self.mark_orphans(Some(new_renderer_id)).await;
         self.reconcile_buffer_flags().await;
         if !applied.is_empty() {
             let all = self.snapshot_displays().await;
@@ -947,9 +1035,10 @@ impl Router {
         }
         self.reconcile_lifecycle().await;
         // Active GC: any renderer that is no longer referenced by any
-        // display dies right now. The new renderer is preserved by id
-        // even if no displays were affected (0-display apply path).
-        self.reap_orphans(Some(new_renderer_id)).await;
+        // display gets a 5s reap timer scheduled. The new renderer is
+        // preserved by id (its own timer cancelled if pending) even if
+        // no displays were affected (0-display apply path).
+        self.mark_orphans(Some(new_renderer_id)).await;
         self.reconcile_buffer_flags().await;
         if had_ids {
             let all = self.snapshot_displays().await;
@@ -1555,9 +1644,21 @@ mod tests {
         ids
     }
 
-    #[tokio::test]
+    /// Yield enough times that any spawned task chains awaiting on
+    /// inner-lock + spawn_blocking + child-wait paths can complete.
+    /// `tokio::time::advance` already yields once but the orphan reap
+    /// chain requires additional polls to finish `mgr.kill` (which
+    /// uses `spawn_blocking` whose JoinHandle resolves out-of-band).
+    async fn drain_executor() {
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn reap_kills_orphan_after_relink_all() {
-        // single display starts on r1; relink_all → r2 should reap r1.
+        // single display starts on r1; relink_all → r2 should reap r1
+        // after the 5s grace window.
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         add_stub_renderer(&mgr, &router, "r1").await;
@@ -1567,14 +1668,31 @@ mod tests {
         // r1 was registered first → first_renderer() picked it for the auto-link.
         router.relink_all_displays_to("r2").await;
 
+        // Let the spawned timer enter `time::sleep` before we touch the clock.
+        drain_executor().await;
+
+        // 4s in: r1 still alive (timer not fired yet).
+        tokio::time::advance(Duration::from_secs(4)).await;
+        drain_executor().await;
+        let live = live_renderers(&mgr).await;
+        assert_eq!(
+            live,
+            vec!["r1".to_string(), "r2".to_string()],
+            "r1 must survive the grace window"
+        );
+
+        // 6s total: timer fires, r1 reaped.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        drain_executor().await;
         let live = live_renderers(&mgr).await;
         assert_eq!(live, vec!["r2".to_string()], "r1 should have been reaped");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn reap_keeps_renderer_still_referenced() {
         // Two displays both on r1. Relink only display A → r2; r1 must
-        // survive because display B still uses it.
+        // survive because display B still uses it (no orphan timer
+        // scheduled).
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         add_stub_renderer(&mgr, &router, "r1").await;
@@ -1584,25 +1702,33 @@ mod tests {
         let _b = router.register_display(reg("DP-1", 1920, 1080)).await;
 
         router.relink_displays_to(&[a.id], "r2").await;
+        drain_executor().await;
+        // Even past the grace window r1 is alive — display B still links it.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
         let live = live_renderers(&mgr).await;
         assert_eq!(live, vec!["r1".to_string(), "r2".to_string()]);
 
-        // Now move display B over too — r1 finally orphaned, gets reaped.
+        // Now move display B over too — r1 finally orphaned; reaped after 5s.
         router.relink_all_displays_to("r2").await;
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
         let live = live_renderers(&mgr).await;
         assert_eq!(live, vec!["r2".to_string()]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn relink_all_with_zero_displays_replaces_old_renderer() {
         // Apply path semantics with no displays attached:
         //   1. apply wp1 → r1 spawned and preserved (no displays to link).
-        //   2. apply wp2 → r2 spawned; r1 must be killed even though
-        //      relink_all touches no displays.
+        //   2. apply wp2 → r2 spawned; r1 must be killed after the
+        //      orphan grace window even though relink_all touches no
+        //      displays.
         // This is what the daemon's WallpaperApply does: register the
         // new renderer, then `relink_all_displays_to(new_id)`. We verify
-        // here that the second leg reaps r1 thanks to
-        // `reap_orphans(Some(new_id))` running unconditionally.
+        // here that the second leg eventually reaps r1 via the orphan
+        // timer scheduled by `mark_orphans(Some(new_id))`.
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
 
@@ -1614,24 +1740,36 @@ mod tests {
         // Second apply: r2 spawn + relink_all (still no displays).
         add_stub_renderer(&mgr, &router, "r2").await;
         router.relink_all_displays_to("r2").await;
+        // Right after relink both renderers are still alive (timer pending).
+        assert_eq!(
+            live_renderers(&mgr).await,
+            vec!["r1".to_string(), "r2".to_string()],
+            "r1 must outlive relink_all by the grace window",
+        );
+        // After the grace window the orphan timer fires and r1 dies.
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
         assert_eq!(
             live_renderers(&mgr).await,
             vec!["r2".to_string()],
-            "r1 must be reaped when r2 takes over with no displays"
+            "r1 must be reaped after the orphan grace window",
         );
 
         // Third apply: same wallpaper as r2 → caller would `find_reusable`
-        // and reuse r2; relink_all("r2") is a no-op + reap_orphans
-        // protects r2.
+        // and reuse r2; relink_all("r2") is a no-op + mark_orphans keeps r2.
         router.relink_all_displays_to("r2").await;
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
         assert_eq!(live_renderers(&mgr).await, vec!["r2".to_string()]);
     }
 
-    #[tokio::test]
-    async fn unregister_last_display_keeps_renderer_alive() {
-        // After all displays unplug, the lone renderer must NOT be
-        // reaped — otherwise hotplug would leave the user with nothing
-        // to auto-link to. Only an explicit apply should replace it.
+    #[tokio::test(start_paused = true)]
+    async fn unregister_last_display_reaps_after_grace() {
+        // After all displays unplug, the lone renderer enters the
+        // orphan grace window. Within 5s a fresh display register
+        // cancels the timer and keeps it alive; past 5s it dies.
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         add_stub_renderer(&mgr, &router, "r1").await;
@@ -1639,36 +1777,85 @@ mod tests {
         assert_eq!(live_renderers(&mgr).await, vec!["r1".to_string()]);
 
         router.unregister_display(h.id).await;
-        assert_eq!(
-            live_renderers(&mgr).await,
-            vec!["r1".to_string()],
-            "renderer must survive last display unregister"
-        );
-
-        // Plug a fresh display in: it auto-links to r1 (first_renderer).
+        drain_executor().await;
+        // Hot-replug within the window: timer cancelled, r1 lives on.
+        tokio::time::advance(Duration::from_secs(4)).await;
+        drain_executor().await;
         let h2 = router.register_display(reg("DP-1", 1920, 1080)).await;
         let snap = router.snapshot_displays().await;
         let entry = snap.iter().find(|d| d.id == h2.id).unwrap();
         assert_eq!(entry.links.len(), 1);
         assert_eq!(entry.links[0].renderer_id, "r1");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        drain_executor().await;
+        assert_eq!(live_renderers(&mgr).await, vec!["r1".to_string()]);
+
+        // Now unplug again and let the grace window elapse — r1 dies.
+        router.unregister_display(h2.id).await;
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
+        assert!(
+            live_renderers(&mgr).await.is_empty(),
+            "renderer must be reaped past the orphan grace window",
+        );
     }
 
-    #[tokio::test]
-    async fn reap_preserves_keep_id_with_no_displays() {
+    #[tokio::test(start_paused = true)]
+    async fn mark_preserves_keep_id_with_no_displays() {
         // 0-display: spawn r1 → it has no link, but `keep=Some("r1")`
-        // protects it. Then spawn r2 and reap_orphans(Some("r2")) must
-        // kill r1 (no longer protected) and keep r2.
+        // protects it (no timer scheduled). Then spawn r2 and
+        // mark_orphans(Some("r2")) schedules r1's timer; after the
+        // grace window r1 is reaped and r2 lives on.
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         add_stub_renderer(&mgr, &router, "r1").await;
-        let killed = router.reap_orphans(Some("r1")).await;
-        assert!(killed.is_empty());
+        let scheduled = router.mark_orphans(Some("r1")).await;
+        assert!(scheduled.is_empty(), "keep id must not be marked");
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
         assert_eq!(live_renderers(&mgr).await, vec!["r1".to_string()]);
 
         add_stub_renderer(&mgr, &router, "r2").await;
-        let killed = router.reap_orphans(Some("r2")).await;
-        assert_eq!(killed, vec!["r1".to_string()]);
+        let scheduled = router.mark_orphans(Some("r2")).await;
+        assert_eq!(scheduled, vec!["r1".to_string()]);
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
         assert_eq!(live_renderers(&mgr).await, vec!["r2".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn orphan_mark_then_cancel_keeps_renderer() {
+        // Mark r1, advance 4s, cancel — r1 must outlive the original
+        // 5s deadline.
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        add_stub_renderer(&mgr, &router, "r1").await;
+
+        router.mark_orphan("r1".to_string()).await;
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        drain_executor().await;
+        router.cancel_orphan_timer("r1").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        drain_executor().await;
+        assert_eq!(live_renderers(&mgr).await, vec!["r1".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn orphan_mark_fires_after_grace() {
+        // Mark r1, advance past 5s — r1 must be reaped.
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        add_stub_renderer(&mgr, &router, "r1").await;
+
+        router.mark_orphan("r1".to_string()).await;
+        drain_executor().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drain_executor().await;
+        assert!(live_renderers(&mgr).await.is_empty());
     }
 
     // -----------------------------------------------------------------

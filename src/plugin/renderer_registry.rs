@@ -587,6 +587,17 @@ impl RendererRegistry {
         self.by_type.get(wp_type)?.first()
     }
 
+    /// Find a renderer by its manifest `name`, regardless of type.
+    /// Returns the first occurrence — `register` keeps duplicates
+    /// across `by_type` so we walk every bucket and stop at the first
+    /// match.
+    pub fn resolve_by_name(&self, name: &str) -> Option<&RendererDef> {
+        self.by_type
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|d| d.name == name)
+    }
+
     /// List all wallpaper types that have at least one renderer.
     pub fn supported_types(&self) -> Vec<&WallpaperType> {
         self.by_type.keys().collect()
