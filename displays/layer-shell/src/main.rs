@@ -163,6 +163,18 @@ struct OutputBinding {
     /// don't subscribe to feedback v4 yet — v3 broadcasts the full
     /// table on bind, which is delivered before we open a UDS.
     dmabuf_caps: Arc<Mutex<BTreeMap<u32, BTreeSet<u64>>>>,
+    /// Set once the worker finished `RegisterDisplay` + `ConsumerCaps`.
+    /// Gates the main thread from sending `UpdateDisplay` mid-init.
+    registered: AtomicBool,
+    /// Serializes wire writes — once the worker is past init the only
+    /// other writer is the main thread pushing `UpdateDisplay` on
+    /// `Configure`, but holding this protects against any future
+    /// concurrent senders too.
+    send_lock: Mutex<()>,
+    /// Last `(width, height)` we successfully pushed via either
+    /// `RegisterDisplay` or `UpdateDisplay`. Skips no-op resends when
+    /// `Configure` repeats the same dims.
+    last_pushed_size: Mutex<Option<(u32, u32)>>,
 }
 
 /// One logical output — wl_output plus the layer_surface/UDS worker
@@ -546,6 +558,9 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
                         frame_pending: AtomicBool::new(false),
                         pending_release_fds: Mutex::new(Vec::new()),
                         dmabuf_caps: state.dmabuf_caps.clone(),
+                        registered: AtomicBool::new(false),
+                        send_lock: Mutex::new(()),
+                        last_pushed_size: Mutex::new(None),
                     })
                 });
                 // `width` / `height` from `configure` are in *logical*
@@ -571,9 +586,17 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
                         physical.1
                     );
                 }
-                // NOTE: `entry` borrows state.outputs mutably; drop it
-                // before re-entering App via maybe_spawn_worker.
-                let _ = binding;
+                // If the worker is already past RegisterDisplay, push
+                // the new physical size to the daemon so fillmode/align
+                // recompute under the new disp dims. First Configure
+                // (worker not yet spawned) is handled by the upcoming
+                // RegisterDisplay carrying these same dims.
+                let arc_binding = binding.clone();
+                if let Err(e) = push_resize_if_registered(&arc_binding, physical) {
+                    log::warn!(
+                        "output {output_name}: push update_display failed: {e}"
+                    );
+                }
                 state.maybe_spawn_worker(output_name);
             }
             zwlr_layer_surface_v1::Event::Closed => {
@@ -691,6 +714,8 @@ fn uds_worker_loop(sock: PathBuf, binding: Arc<OutputBinding>) {
         // hot-unplug path doesn't shutdown a stale fd on the next
         // connection.
         binding.stream.write().unwrap().take();
+        binding.registered.store(false, Ordering::SeqCst);
+        binding.last_pushed_size.lock().unwrap().take();
         match res {
             Ok(()) => log::info!(
                 "[{}] UDS session ended cleanly",
@@ -709,6 +734,50 @@ fn uds_worker_loop(sock: PathBuf, binding: Arc<OutputBinding>) {
     }
 }
 
+/// Main-thread call from `Configure`: if the worker has finished
+/// `RegisterDisplay`, send `UpdateDisplay` with the new physical dims.
+/// Skips if the worker hasn't connected yet, isn't past register, or
+/// the size matches what was last pushed. Worker spawn time + the
+/// post-handshake catch-up in `run_uds_session` cover the gap when
+/// `registered` is still false.
+fn push_resize_if_registered(
+    binding: &Arc<OutputBinding>,
+    physical: (u32, u32),
+) -> Result<()> {
+    if !binding.registered.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    {
+        let last = binding.last_pushed_size.lock().unwrap();
+        if *last == Some(physical) {
+            return Ok(());
+        }
+    }
+    let stream = match binding.stream.read().unwrap().as_ref() {
+        Some(s) => s.clone(),
+        None => return Ok(()),
+    };
+    let _g = binding.send_lock.lock().unwrap();
+    codec::send_request(
+        &stream,
+        &ProtoRequest::UpdateDisplay {
+            width: physical.0,
+            height: physical.1,
+            properties: Vec::new(),
+        },
+        &[],
+    )
+    .map_err(|e| anyhow!("send update_display: {e}"))?;
+    *binding.last_pushed_size.lock().unwrap() = Some(physical);
+    log::info!(
+        "[{}] pushed update_display {}x{}",
+        binding.display_name,
+        physical.0,
+        physical.1
+    );
+    Ok(())
+}
+
 fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
     let stream = Arc::new(
         UnixStream::connect(sock)
@@ -724,17 +793,20 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
         sock.display()
     );
 
-    codec::send_request(
-        &stream,
-        &ProtoRequest::Hello {
-            protocol: PROTOCOL_NAME.to_string(),
-            client_name: binding.display_name.clone(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-            client_protocol_version: PROTOCOL_VERSION,
-        },
-        &[],
-    )
-    .map_err(|e| anyhow!("send hello: {e}"))?;
+    {
+        let _g = binding.send_lock.lock().unwrap();
+        codec::send_request(
+            &stream,
+            &ProtoRequest::Hello {
+                protocol: PROTOCOL_NAME.to_string(),
+                client_name: binding.display_name.clone(),
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                client_protocol_version: PROTOCOL_VERSION,
+            },
+            &[],
+        )
+        .map_err(|e| anyhow!("send hello: {e}"))?;
+    }
     let (welcome, _) = codec::recv_event(&stream).map_err(|e| anyhow!("recv welcome: {e}"))?;
     match welcome {
         ProtoEvent::Welcome { features, .. } => {
@@ -751,23 +823,27 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
         .unwrap()
         .expect("worker started before configure");
 
-    codec::send_request(
-        &stream,
-        &ProtoRequest::RegisterDisplay {
-            name: binding.display_name.clone(),
-            width,
-            height,
-            refresh_mhz: 60_000,
-            // layer-shell hands the dmabuf to the compositor (which
-            // imports on its own GPU); we don't introspect that here,
-            // so report unknown and let the daemon force HOST_VISIBLE.
-            drm_render_major: 0,
-            drm_render_minor: 0,
-            properties: Vec::new(),
-        },
-        &[],
-    )
-    .map_err(|e| anyhow!("send register_display: {e}"))?;
+    {
+        let _g = binding.send_lock.lock().unwrap();
+        codec::send_request(
+            &stream,
+            &ProtoRequest::RegisterDisplay {
+                name: binding.display_name.clone(),
+                width,
+                height,
+                refresh_mhz: 60_000,
+                // layer-shell hands the dmabuf to the compositor (which
+                // imports on its own GPU); we don't introspect that here,
+                // so report unknown and let the daemon force HOST_VISIBLE.
+                drm_render_major: 0,
+                drm_render_minor: 0,
+                properties: Vec::new(),
+            },
+            &[],
+        )
+        .map_err(|e| anyhow!("send register_display: {e}"))?;
+    }
+    *binding.last_pushed_size.lock().unwrap() = Some((width, height));
 
     let display_id = match codec::recv_event(&stream)
         .map_err(|e| anyhow!("recv display_accepted: {e}"))?
@@ -845,6 +921,7 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
                 (fourccs, mod_counts, modifiers, usages, plane_counts)
             }
         };
+        let _g = binding.send_lock.lock().unwrap();
         codec::send_request(
             &stream,
             &ProtoRequest::ConsumerCaps {
@@ -872,6 +949,36 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
         "[{}] registered as display_id={display_id} ({width}x{height})",
         binding.display_name
     );
+
+    binding.registered.store(true, Ordering::SeqCst);
+
+    // Reconcile: a Configure may have arrived with a new size while we
+    // were finishing the handshake; the main thread's push would have
+    // been dropped because `registered` was still false. Diff against
+    // last_pushed_size and emit one UpdateDisplay if needed.
+    let latest = *binding.configured_size.lock().unwrap();
+    if let Some(latest) = latest {
+        if latest != (width, height) {
+            let _g = binding.send_lock.lock().unwrap();
+            codec::send_request(
+                &stream,
+                &ProtoRequest::UpdateDisplay {
+                    width: latest.0,
+                    height: latest.1,
+                    properties: Vec::new(),
+                },
+                &[],
+            )
+            .map_err(|e| anyhow!("send catch-up update_display: {e}"))?;
+            *binding.last_pushed_size.lock().unwrap() = Some(latest);
+            log::info!(
+                "[{}] post-handshake size catch-up: {}x{}",
+                binding.display_name,
+                latest.0,
+                latest.1
+            );
+        }
+    }
 
     let mut gen: Option<u64> = None;
     let mut pool: Vec<WlBuffer> = Vec::new();
