@@ -85,7 +85,7 @@ if [[ ! -f "$CONDA_PREFIX/lib/cmake/Qt6Protobuf/Qt6ProtobufConfig.cmake" ]]; the
 fi
 
 # ---- 3. CMake configure ----
-step "CMake configure (skipping renderer plugins; daemon + UI only)"
+step "CMake configure (daemon + UI + image/video renderer plugins)"
 cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -103,7 +103,9 @@ cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
     -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
     -DWAYWALLEN_BUILD_DAEMON=ON \
     -DWAYWALLEN_BUILD_UI=ON \
-    -DWAYWALLEN_BUILD_PLUGINS=OFF
+    -DWAYWALLEN_BUILD_PLUGINS=ON \
+    -DWAYWALLEN_BUILD_IMAGE_PLUGIN=ON \
+    -DWAYWALLEN_BUILD_VIDEO_PLUGIN=ON
 
 # ---- 4. Build + install ----
 step "Compiling (first build ~10–20 min; subsequent runs are incremental and fast)"
@@ -184,6 +186,8 @@ EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-shell-integration" \
     --executable "$INSTALL_DIR/bin/waywallen" \
     --executable "$INSTALL_DIR/bin/waywallen-ui" \
     --executable "$INSTALL_DIR/bin/waywallen-display-layer-shell" \
+    --executable "$INSTALL_DIR/bin/waywallen-image-renderer" \
+    --executable "$INSTALL_DIR/bin/waywallen-video-renderer" \
     --desktop-file "$DESKTOP_FILE" \
     --icon-file "$ICON_FILE" \
     --custom-apprun "$APPRUN_TMP"
@@ -228,6 +232,4 @@ Run it:
     "$APPIMAGE_OUT"
 
 Rebuild: re-run ./scripts/build_appimage.sh (incremental rebuild + repack).
-Enable renderer plugins (mpv / image): flip WAYWALLEN_BUILD_PLUGINS=OFF to ON
-in this script and add mpv / vulkan-headers / etc. to environment.yml as needed.
 EOF

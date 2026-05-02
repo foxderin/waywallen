@@ -11,7 +11,7 @@
 # $CONDA_PREFIX/lib/pkgconfig/. Set FORCE=1 to rebuild.
 #
 # Tunables (env vars):
-#   FFMPEG_VERSION   git tag to check out, default n7.1.3
+#   FFMPEG_VERSION   git tag to check out, default n8.1
 #   FORCE            set to 1 to rebuild even if the pkg-config stamp exists
 
 set -euo pipefail
@@ -21,7 +21,7 @@ set -euo pipefail
     exit 1
 }
 
-FFMPEG_VERSION="${FFMPEG_VERSION:-n7.1.3}"
+FFMPEG_VERSION="${FFMPEG_VERSION:-n8.1}"
 FFMPEG_SRC="$CONDA_PREFIX/.ffmpeg-src"
 PKG_STAMP="$CONDA_PREFIX/lib/pkgconfig/libavcodec.pc"
 
@@ -88,13 +88,14 @@ CFG_ARGS=(
     --enable-pic
     --disable-everything
 
-    # External libs we never want linked in. Vulkan in particular fails to
-    # build against conda's vulkan-headers because n7.1.x uses
-    # VK_EXT_descriptor_buffer which is newer than the bundled headers; we
-    # run our own Vulkan stack via waywallen-renderer. The X / audio / v4l2
-    # libs aren't in the conda env so configure auto-disables them; we don't
-    # list them here to avoid flag-name churn between FFmpeg releases.
-    --disable-vulkan
+    # External libs. Vulkan is enabled so libavcodec can offer the
+    # VK_KHR_video_decode hwaccel (h264/hevc/av1) that the video plugin
+    # consumes. Headers come from conda-forge vulkan-headers; the loader
+    # (libvulkan.so.1) ships via vulkan-loader and is bundled into the
+    # AppImage. The X / audio / v4l2 libs aren't in the conda env so
+    # configure auto-disables them; we don't list them here to avoid
+    # flag-name churn between FFmpeg releases.
+    --enable-vulkan
     --disable-vaapi --disable-vdpau
     --disable-xlib --disable-libxcb
 )
