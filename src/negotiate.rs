@@ -219,7 +219,6 @@ pub struct NegotiatedScheme {
     pub sync_mode: u32, // exactly one bit of SYNC_*
     pub color: u32,
     pub mem_hint: u32,
-    pub extent: (u32, u32),
     pub count: u32, // pool size, daemon-chosen
     /// v3: explicit allocation path. Bridge executes accordingly,
     /// no plugin-side fallback.
@@ -434,7 +433,6 @@ const DEFAULT_POOL_COUNT: u32 = 3;
 pub fn pick(
     producer: &PeerCaps,
     consumer: &PeerCaps,
-    extent: (u32, u32),
 ) -> Result<NegotiatedScheme, NegotiateError> {
     let same_dev = producer.identity.same_device(&consumer.identity);
     let sync_mode = pick_sync(producer.sync, consumer.sync)?;
@@ -457,7 +455,7 @@ pub fn pick(
         let mem_hint = pick_mem_hint_same_dev(producer.mem_hint, consumer.mem_hint);
         return Ok(NegotiatedScheme {
             fourcc, modifier, plane_count, sync_mode, color, mem_hint,
-            extent, count: DEFAULT_POOL_COUNT, path, mem_source,
+            count: DEFAULT_POOL_COUNT, path, mem_source,
         });
     }
 
@@ -473,7 +471,6 @@ pub fn pick(
         sync_mode,
         color,
         mem_hint: 0,
-        extent,
         count: DEFAULT_POOL_COUNT,
         path: PathCategory::CompatLinear,
         mem_source: MemSource::GpuLinear,
@@ -914,7 +911,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_DEVICE_LOCAL | MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.fourcc, DRM_FORMAT_ABGR8888);
         assert_eq!(s.modifier, nl);
         assert_eq!(s.plane_count, 1);
@@ -944,7 +941,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.fourcc, DRM_FORMAT_ABGR8888);
         assert_eq!(s.modifier, DRM_FORMAT_MOD_LINEAR);
         assert_eq!(s.path, PathCategory::CompatLinear);
@@ -973,7 +970,7 @@ mod tests {
             MEM_HINT_HOST_VISIBLE,
         );
         assert_eq!(
-            pick(&p, &c, (640, 360)).unwrap_err(),
+            pick(&p, &c).unwrap_err(),
             NegotiateError::NoFormatIntersection
         );
     }
@@ -1000,7 +997,7 @@ mod tests {
             MEM_HINT_HOST_VISIBLE,
         );
         p.blacklist.insert((DRM_FORMAT_ABGR8888, nl));
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.modifier, DRM_FORMAT_MOD_LINEAR);
     }
 
@@ -1028,7 +1025,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_DEVICE_LOCAL | MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.modifier, DRM_FORMAT_MOD_LINEAR);
         assert_eq!(s.path, PathCategory::CompatLinear);
         assert_eq!(s.mem_source, MemSource::GpuLinear);
@@ -1055,7 +1052,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.modifier, DRM_FORMAT_MOD_LINEAR);
         assert_eq!(s.path, PathCategory::CompatLinear);
         assert_eq!(s.mem_source, MemSource::GpuLinear);
@@ -1126,7 +1123,7 @@ mod tests {
             ],
             ident_uuid(0xBB),
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         // BTreeMap order: 'AB24' = 0x34324241, 'XR24' = 0x34325258 —
         // ABGR comes first in producer iteration but consumer doesn't
         // list it, so XRGB is the first common fourcc.
@@ -1161,7 +1158,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.fourcc, DRM_FORMAT_ABGR8888);
         assert_eq!(s.modifier, DRM_FORMAT_MOD_LINEAR);
         assert_eq!(s.path, PathCategory::CompatLinear);
@@ -1188,7 +1185,7 @@ mod tests {
             ident_uuid(0xBB),
         );
         p.blacklist.insert((DRM_FORMAT_ABGR8888, DRM_FORMAT_MOD_LINEAR));
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.fourcc, DRM_FORMAT_XRGB8888);
         assert_eq!(s.modifier, DRM_FORMAT_MOD_LINEAR);
     }
@@ -1221,7 +1218,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.path, PathCategory::CompatLinear);
         assert_eq!(s.mem_source, MemSource::GpuLinear);
         assert_eq!(s.mem_hint, 0);
@@ -1245,7 +1242,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert_eq!(s.sync_mode, SYNC_SYNCOBJ_TIMELINE);
 
         // Drop TIMELINE on consumer → BINARY wins.
@@ -1257,7 +1254,7 @@ mod tests {
             DEFAULT_COLOR,
             MEM_HINT_HOST_VISIBLE,
         );
-        let s2 = pick(&p, &c2, (640, 360)).unwrap();
+        let s2 = pick(&p, &c2).unwrap();
         assert_eq!(s2.sync_mode, SYNC_SYNCOBJ_BINARY);
     }
 
@@ -1280,7 +1277,7 @@ mod tests {
             MEM_HINT_HOST_VISIBLE,
         );
         assert_eq!(
-            pick(&p, &c, (640, 360)).unwrap_err(),
+            pick(&p, &c).unwrap_err(),
             NegotiateError::NoSyncIntersection
         );
     }
@@ -1309,7 +1306,7 @@ mod tests {
             c_color,
             MEM_HINT_HOST_VISIBLE,
         );
-        let s = pick(&p, &c, (640, 360)).unwrap();
+        let s = pick(&p, &c).unwrap();
         assert!(s.color & COLOR_ENC_BT709 != 0, "BT709 must be picked");
         assert!(
             s.color & COLOR_RANGE_LIMITED != 0,

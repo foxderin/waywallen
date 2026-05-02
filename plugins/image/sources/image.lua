@@ -103,4 +103,15 @@ function M.scan(ctx)
     return entries
 end
 
+-- SPAWN_VERSION 3: daemon calls this at WallpaperApply time to build
+-- the renderer's CLI argv. Returns a flat {string -> string} map; each
+-- key becomes `--<key> <value>` after `--ipc <socket>`. The image
+-- renderer's manifest declares no `extras` whitelist, so only `path`
+-- is meaningful here.
+function M.extras(entry)
+    return {
+        path = entry.resource,
+    }
+end
+
 return M

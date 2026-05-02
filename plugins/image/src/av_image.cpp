@@ -1,5 +1,7 @@
 #include "av_image.hpp"
 
+#include "waywallen-bridge/extent_resolve.h"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -60,14 +62,11 @@ std::string av_err_str(int rc) {
 } // namespace
 
 RgbaBuf decode_to_rgba(const std::string& path,
-                       uint32_t           target_w,
-                       uint32_t           target_h,
+                       uint32_t           extent_w,
+                       uint32_t           extent_h,
+                       uint32_t           extent_mode,
                        DecodeError*       err) {
     RgbaBuf out;
-    if (target_w == 0 || target_h == 0) {
-        fail(err, "target dimensions must be non-zero");
-        return out;
-    }
 
     AVFormatContext* raw_fmt = nullptr;
     if (int rc = avformat_open_input(&raw_fmt, path.c_str(), nullptr, nullptr);
@@ -171,6 +170,13 @@ RgbaBuf decode_to_rgba(const std::string& path,
         fail(err, "decoded frame has invalid dimensions/format");
         return out;
     }
+
+    // Resolve daemon's hint against the decoded native size.
+    uint32_t target_w = 0, target_h = 0;
+    ww_resolve_extent(extent_w, extent_h, extent_mode,
+                      static_cast<uint32_t>(src_w),
+                      static_cast<uint32_t>(src_h),
+                      &target_w, &target_h);
 
     SwsPtr sws(sws_getContext(src_w, src_h, src_fmt,
                               static_cast<int>(target_w),

@@ -3,7 +3,7 @@ name = "waywallen-image"
 bin = "../../../bin/waywallen-image-renderer"
 types = ["image"]
 priority = 100
-spawn_version = 1
+spawn_version = 3
 
 [renderer.settings]
 # Frame rate the image renderer drives bridge presents at. Image

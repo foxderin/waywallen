@@ -291,22 +291,22 @@ mod tests {
     #[test]
     fn roundtrip_apply_settings() {
         let (a, b) = pair();
+        // SPAWN_VERSION 3: pure kv. fps lives as a kv key when the
+        // manifest declares it; no typed scalar.
         let sent = Request::ApplySettings {
             settings: vec![
+                ("fps".into(), "60".into()),
                 ("loop_file".into(), "no".into()),
                 ("hwdec".into(), "auto-safe".into()),
             ],
-            fps: 60,
         };
         send_control(&a, &sent, &[]).unwrap();
         let (got, _) = recv_control(&b).unwrap();
         assert_eq!(sent, got);
 
-        // fps=0 sentinel: still a valid wire message, just a delta-only
-        // settings push with no fps change.
+        // Empty kv list is a valid (no-op) wire message.
         let sent2 = Request::ApplySettings {
             settings: vec![("volume".into(), "0.5".into())],
-            fps: 0,
         };
         send_control(&a, &sent2, &[]).unwrap();
         let (got2, _) = recv_control(&b).unwrap();
@@ -317,19 +317,14 @@ mod tests {
     fn roundtrip_init() {
         let (a, b) = pair();
         let sent = Request::Init {
-            spawn_version: 1,
-            renderer_name: "test-renderer".into(),
+            spawn_version: 3,
             extent_w: 1920,
             extent_h: 1080,
-            fps: 60,
-            test_pattern: 0,
-            resource_kind: "scene".into(),
-            resource_primary: "/path/to/scene.pkg".into(),
-            resource_extras: vec![
-                ("assets".into(), "/path/to/assets".into()),
-                ("workshop_id".into(), "12345".into()),
+            extent_mode: 0,
+            settings: vec![
+                ("fps".into(), "60".into()),
+                ("volume".into(), "1.0".into()),
             ],
-            settings: vec![],
         };
         let _ = PROTOCOL_VERSION; // silence unused-import warning
         send_control(&a, &sent, &[]).unwrap();

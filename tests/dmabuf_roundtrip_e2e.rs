@@ -276,12 +276,16 @@ async fn run_one_pair(
     // `--print-caps` which doesn't consult this env var.
     std::env::set_var("WAYWALLEN_IMAGE_DUMP_DIR", &prod_dir);
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("image".to_string(), image_path.display().to_string());
+    metadata.insert("path".to_string(), image_path.display().to_string());
+    // SPAWN_VERSION 3: extras becomes the CLI argv (`--path …`).
+    let extras = metadata.clone();
     let req = SpawnRequest {
         wp_type: "image".to_string(),
+        extras,
         metadata,
         width: 640,
         height: 360,
+        extent_mode: 0,
         fps: 30,
         test_pattern: false,
         renderer_name: None,

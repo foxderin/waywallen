@@ -82,6 +82,15 @@ struct VkFrameView {
 
 class VideoDecoder {
 public:
+    // Read the native video resolution from the file's first video
+    // stream without committing to a decoder. Used by callers that
+    // need the intrinsic dimensions before allocating the GPU
+    // producer (which itself needs sizing). Sets `*native_w` and
+    // `*native_h` and returns true on success.
+    static bool probe_native(const std::string& path,
+                             uint32_t* native_w, uint32_t* native_h,
+                             DecodeError* err);
+
     // `target_w`/`target_h` are the wallpaper extent. Both are rounded
     // up to even pixel boundaries (NV12 chroma is 4:2:0). Setting
     // `loop=true` causes EOF to seek back to the start automatically.
@@ -144,7 +153,8 @@ private:
      * path); non-NULL means "attach this caller-built device" and the
      * helper takes ownership on success/failure. */
     static std::unique_ptr<VideoDecoder>
-    build_internal(const std::string& path, uint32_t target_w, uint32_t target_h,
+    build_internal(const std::string& path,
+                   uint32_t target_w, uint32_t target_h,
                    bool loop, void* pre_built_hwdev,
                    DecodeError* err);
 

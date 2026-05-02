@@ -57,27 +57,26 @@
 
   Surface (consolidated; pre-1.0, internal testing — no compat shims):
 
-    Spawn handshake. Daemon sends `init` (opcode 1) immediately after
-    accept(), carrying the typed spawn payload: extent, fps,
-    test_pattern, the canonical `resource_kind` / `resource_primary`,
-    `resource_extras`, and the manifest-declared `[renderer.settings]`
-    kv list. `resource_kind` mirrors the wallpaper's `wp_type`;
-    `resource_primary` is `metadata["path"]` whenever the renderer
-    manifest declares any extras/settings schema (manifests no longer
-    pick a per-renderer primary key). The renderer answers with
-    `ready`, or rejects with `init_nack` (opcode 8) on unknown
-    `spawn_version` / unsupported `resource_kind`; the daemon kills
-    the child and surfaces the reason.
+    Spawn handshake (v3). Resource path + extras (assets, workshop_id,
+    …) ride on the renderer's CLI argv as `--<key> <value>` pairs the
+    daemon assembles from `source_plugin.extras(entry)`. Daemon then
+    sends `init` (opcode 1) immediately after accept(), carrying:
+    extent triple + the resolved L1 `[renderer.settings]` kv list
+    (fps / test_pattern / volume / loop_file / hwdec / render_node /
+    … all live as kv keys here, no typed scalars promoted). The
+    renderer answers with `ready`, or rejects with `init_nack`
+    (opcode 8) on `spawn_version` mismatch; the daemon kills the
+    child and surfaces the reason.
 
     Hot reload. Daemon dispatches `apply_settings` (opcode 2) over a
     live renderer's IPC whenever a non-identity setting in the
     `[renderer.settings]` table changes (mpv `loop_file`/`hwdec`,
-    video `volume`, wescene `volume`, `fps`, …) instead of respawning
-    the child. `fps` is encoded as `u32` with `0` as the "unset"
-    sentinel (the codegen has no `optional u32`). Pairs with the
-    daemon-side identity-aware `find_reusable`: a live renderer
-    differing only on hot-reloadable settings is reused via
-    `apply_settings` rather than respawned.
+    video `volume`, wescene `volume` / `fps`, …) instead of
+    respawning the child. The whole payload is a kv list of the
+    diff — fps is just one of those keys when the renderer's
+    manifest declares it. Pairs with the daemon-side identity-aware
+    `find_reusable`: a live renderer differing only on hot-reloadable
+    settings is reused via `apply_settings` rather than respawned.
 
     Modifier negotiation. The renderer ships `format_caps` after
     `ready` and before any `bind_buffers`, advertising
@@ -109,7 +108,7 @@
     proprietary where every modifier is external_only), forcing the
     daemon to pick a COMPAT_LINEAR path regardless of consumer caps.
 
-  Version: 1
+  Version: 1 (file); spawn payload = SPAWN_VERSION 3
 -->
 <protocol name="waywallen_ipc" version="1">
 
@@ -118,66 +117,64 @@
        ================================================================== -->
 
   <!--
-    Spawn-time `init` (v4): typed payload sent by the daemon
-    immediately after accept(), carrying everything the renderer
-    needs to bring up its Vulkan/EGL/audio state. Replaces the
-    legacy "all-CLI-argv" path.
+    Spawn-time `init` (SPAWN_VERSION 3): typed payload sent by the
+    daemon immediately after accept(). Carries the minimum the
+    renderer needs to allocate its render target (extent triple) plus
+    the resolved L1 `[renderer.settings]` kv list. Resource path and
+    plugin-specific extras (assets, workshop_id, …) ride on the
+    renderer's CLI argv instead — the daemon constructs argv from
+    `source_plugin.extras(entry)` before fork+exec.
 
     Fields:
-      `spawn_version`   — protocol version of the Init payload itself.
-                          Renderer MUST send `init_nack` if it does
-                          not recognise the value (current = 1).
-      `renderer_name`   — manifest name, debug-only.
-      `extent_w/h`      — pixel extent.
-      `fps`             — target framerate (0 = unspecified).
-      `test_pattern`    — XML codegen lacks a `bool` type, so this is
-                          encoded as `u32` (0 = off, 1 = drive the
-                          host-owned offscreen test ring).
-      `resource_kind`   — wallpaper type ("scene" | "video" | "image"
-                          | …); matches the daemon's `WallpaperType`.
-      `resource_primary`— canonical primary path/value (the scene pkg,
-                          video file, image file, …).
-      `resource_extras` — secondary metadata kv pairs (assets dir,
-                          workshop_id, …). Excludes the key whose
-                          value populates `resource_primary`.
-      `settings`        — manifest-declared tunables (volume, hwdec,
-                          loop_file, …). Empty in Step 1.
-                          Renamed from `plugin_settings` in v6.
+      `spawn_version` — protocol version of the Init payload itself.
+                        Renderer MUST send `init_nack` if it does not
+                        recognise the value. Current = 3.
+      `extent_w/h`    — pixel extent. `0` on either axis means
+                        "unspecified — renderer derives that axis
+                        from its content's intrinsic size".
+      `extent_mode`   — interpretation of `extent_w/h`:
+                        `0` = AS_GIVEN: 0-axis means native, both 0
+                              means fully native, both >0 means
+                              exact daemon-imposed size.
+                        `1` = FIT_SHORTER: shorter native axis is
+                              set to `max(extent_w, extent_h)`,
+                              other axis scaled to keep native aspect.
+      `settings`      — manifest-declared tunables, fully resolved
+                        (L1 = per-instance override || plugin default ||
+                        schema default). All scalar settings — `fps`,
+                        `test_pattern`, `volume`, `loop_file`, `hwdec`,
+                        `render_node`, … — live here as kv keys
+                        whenever the renderer's manifest declares
+                        them. No typed scalar promotion: the same kv
+                        shape is used in `apply_settings` for live
+                        diffs.
   -->
   <request name="init" opcode="1">
     <arg name="spawn_version" type="u32"/>
-    <arg name="renderer_name" type="string"/>
     <arg name="extent_w" type="u32"/>
     <arg name="extent_h" type="u32"/>
-    <arg name="fps" type="u32"/>
-    <arg name="test_pattern" type="u32"/>
-    <arg name="resource_kind" type="string"/>
-    <arg name="resource_primary" type="string"/>
-    <arg name="resource_extras" type="kv_list"/>
+    <arg name="extent_mode" type="u32"/>
     <arg name="settings" type="kv_list"/>
   </request>
 
   <!--
-    v5 hot-reload: push a delta of `[settings]` (and optionally a new
-    `fps`) to a live renderer without respawning. Only identity=false
-    settings declared in the renderer's manifest are valid here; the
-    daemon side filters before sending. `fps` uses `0` as the "unset"
-    sentinel since the codegen has no `optional u32`.
-
-    v6 renamed the kv list from `plugin_settings` to `settings` to
-    match the manifest's `[renderer.settings]` table.
+    Hot-reload: push a delta of `[renderer.settings]` to a live
+    renderer without respawning. Only `identity = false` settings
+    from the renderer's manifest are valid here (daemon-side
+    `find_reusable` filters before sending). All scalar settings,
+    including `fps` and `test_pattern`, ride as kv keys — same shape
+    as `init.settings`.
 
     Renderer-side dispatch:
-      - mpv: applies `loop_file` / `hwdec` via `mpv_set_property`
-        (mpv option names use dashes, not underscores).
+      - mpv: `loop_file` / `hwdec` → `mpv_set_property` (mpv option
+        names use dashes, not underscores).
       - image: warns when `settings` is non-empty (no hot-reloadable
         knobs declared by the manifest).
-      - wescene: applies `volume` via the existing scene-graph hook
-        and `fps` via the same path as `set_fps` (handled by OWE).
+      - video: `loop_file` / `volume` / `fps`.
+      - wescene: `volume`, `fps`.
   -->
   <request name="apply_settings" opcode="2">
     <arg name="settings" type="kv_list"/>
-    <arg name="fps" type="u32"/>
   </request>
 
   <request name="play" opcode="3"/>
@@ -207,12 +204,20 @@
   <!--
     Modifier-negotiation v2 — replaces the deleted `configure_buffers`. The
     daemon ships exactly the (fourcc, modifier, plane_count, sync_mode,
-    color, mem_hint, extent, count) tuple it picked from the producer ∩
+    color, mem_hint, count) tuple it picked from the producer ∩
     consumer caps intersection. The renderer answers with a fresh
     `bind_buffers` whose fourcc + modifier match (and a strictly
     increasing `generation`). On failure the renderer sends
     `bind_failed` (opcode 7); the daemon then blacklists the
     (fourcc, modifier) pair on this renderer and tries again.
+
+    Render-target extent is intentionally NOT a negotiation field.
+    The renderer is the producer and already resolved its render
+    extent from `Init.{extent_w,extent_h,extent_mode}` against its
+    content's intrinsic size; that's what `advertise_caps` carries.
+    The bridge sizes its dmabuf slots from that, then `bind_buffers`
+    reports the actual buffer dims back to the daemon for the
+    consumer side.
 
     Field meanings:
       `fourcc`        — DRM_FORMAT_* (canonical: ABGR8888 = 'AB24' = 0x34324241).
@@ -221,7 +226,6 @@
       `sync_mode`     — see `format_caps.sync_caps` bits below; exactly one bit.
       `color`         — packed encoding/range/alpha; see `format_caps.color_caps`.
       `mem_hint`      — bitfield: same bits as `format_caps.mem_hints`.
-      `extent_w/h`    — pixel extent of each buffer.
       `count`         — pool size (number of buffers in the swapchain).
       `path`          — v3, see `ww_path_category` codes in the v3 doc
                         block above. Bridge dispatches its allocation
@@ -236,8 +240,6 @@
     <arg name="sync_mode" type="u32"/>
     <arg name="color" type="u32"/>
     <arg name="mem_hint" type="u32"/>
-    <arg name="extent_w" type="u32"/>
-    <arg name="extent_h" type="u32"/>
     <arg name="count" type="u32"/>
     <arg name="path" type="u32"/>
     <arg name="mem_source" type="u32"/>

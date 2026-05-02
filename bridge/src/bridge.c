@@ -591,14 +591,9 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t *out) {
      * After this point the union is logically empty so calling
      * `ww_bridge_control_free` on it would double-free; we skip it. */
     out->spawn_version    = ctl.u.init.spawn_version;
-    out->renderer_name    = ctl.u.init.renderer_name;
     out->extent_w         = ctl.u.init.extent_w;
     out->extent_h         = ctl.u.init.extent_h;
-    out->fps              = ctl.u.init.fps;
-    out->test_pattern     = ctl.u.init.test_pattern != 0u ? 1 : 0;
-    out->resource_kind    = ctl.u.init.resource_kind;
-    out->resource_primary = ctl.u.init.resource_primary;
-    out->resource_extras  = ctl.u.init.resource_extras;
+    out->extent_mode      = ctl.u.init.extent_mode;
     out->settings         = ctl.u.init.settings;
 
     /* Zero the union members we just stole so `ww_bridge_control_free`
@@ -613,20 +608,10 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t *out) {
 
 void ww_bridge_init_free(ww_bridge_init_t *out) {
     if (!out) return;
-    free(out->renderer_name);
-    free(out->resource_kind);
-    free(out->resource_primary);
     /* `ww_kv_list_t` cleanup mirrors what the auto-generated
      * `free_kv_list` does in ipc_v1.c — but that helper is `static`
      * inside the generated TU. Replicate the freeing pattern locally
      * (free key+value strings, then the `data` array). */
-    if (out->resource_extras.data) {
-        for (uint32_t i = 0; i < out->resource_extras.count; ++i) {
-            free(out->resource_extras.data[i].key);
-            free(out->resource_extras.data[i].value);
-        }
-        free(out->resource_extras.data);
-    }
     if (out->settings.data) {
         for (uint32_t i = 0; i < out->settings.count; ++i) {
             free(out->settings.data[i].key);
@@ -666,7 +651,6 @@ int ww_bridge_apply_settings_from_control(ww_bridge_control_t *ctrl,
      * `ctrl->u.apply_settings.settings` is empty so
      * `ww_bridge_control_free(ctrl)` is a no-op for that arm. */
     out->settings = ctrl->u.apply_settings.settings;
-    out->fps      = ctrl->u.apply_settings.fps;
     memset(&ctrl->u.apply_settings.settings, 0,
            sizeof(ctrl->u.apply_settings.settings));
     return 0;

@@ -112,20 +112,14 @@ typedef enum ww_event_op {
 
 typedef struct ww_req_init_t {
     uint32_t spawn_version;
-    char *renderer_name;
     uint32_t extent_w;
     uint32_t extent_h;
-    uint32_t fps;
-    uint32_t test_pattern;
-    char *resource_kind;
-    char *resource_primary;
-    ww_kv_list_t resource_extras;
+    uint32_t extent_mode;
     ww_kv_list_t settings;
 } ww_req_init_t;
 
 typedef struct ww_req_apply_settings_t {
     ww_kv_list_t settings;
-    uint32_t fps;
 } ww_req_apply_settings_t;
 
 typedef struct ww_req_play_t {
@@ -156,8 +150,6 @@ typedef struct ww_req_negotiate_buffers_t {
     uint32_t sync_mode;
     uint32_t color;
     uint32_t mem_hint;
-    uint32_t extent_w;
-    uint32_t extent_h;
     uint32_t count;
     uint32_t path;
     uint32_t mem_source;

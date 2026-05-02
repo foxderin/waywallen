@@ -90,16 +90,46 @@ async fn apply_wallpaper_inner(
         return Err(anyhow!("no renderer for wallpaper type '{}'", entry.wp_type));
     }
 
-    let pre_existing: Vec<String> = app.renderer_manager.list().await;
+    // The D-Bus + rotator entry point always relinks every display
+    // to the new renderer (relink_all_displays_to below). That means
+    // every pre-existing renderer ends up with zero enabled links. We
+    // stop them *before* spawning the new one so peak VRAM stays at
+    // one renderer's working set instead of overlapping two.
+    let to_stop = app.router.renderers_fully_replaced_by(None).await;
+    if !to_stop.is_empty() {
+        app.router.stop_renderers(&to_stop).await;
+    }
 
-    let width = if width == 0 { 1920 } else { width };
-    let height = if height == 0 { 1080 } else { height };
+    // `width`/`height` of `0` are legal — they tell the renderer to
+    // derive that axis from the wallpaper's intrinsic size. Only `fps`
+    // still has a hard floor since `0` is the unset sentinel on the
+    // wire.
     let fps = if fps == 0 { 30 } else { fps };
+    // SPAWN_VERSION 3: source plugin's `extras(entry)` Lua callback
+    // returns the CLI argv dict. Plugins that haven't migrated fall
+    // back to entry.metadata inside `call_extras`.
+    let extras = match app
+        .source_manager
+        .lock()
+        .await
+        .call_extras(&entry.plugin_name, &entry)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!(
+                "source_plugin '{}'.extras() failed: {e}; using entry.metadata fallback",
+                entry.plugin_name
+            );
+            entry.metadata.clone()
+        }
+    };
     let spawn_req = renderer_manager::SpawnRequest {
         wp_type: entry.wp_type.clone(),
+        extras,
         metadata: entry.metadata.clone(),
         width,
         height,
+        extent_mode: crate::settings::extent_mode::AS_GIVEN,
         fps,
         test_pattern: false,
         renderer_name: None,
@@ -109,12 +139,6 @@ async fn apply_wallpaper_inner(
         app.router.register_renderer(handle).await;
     }
     app.router.relink_all_displays_to(&renderer_id).await;
-    for old_id in pre_existing {
-        if old_id != renderer_id {
-            app.router.unregister_renderer(&old_id).await;
-            let _ = app.renderer_manager.kill(&old_id).await;
-        }
-    }
 
     {
         let mut playlist = app.playlist.lock().await;

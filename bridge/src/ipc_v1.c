@@ -392,14 +392,9 @@ int ww_req_init_encode(const ww_req_init_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
     if ((rc = w_u32(out, m->spawn_version))) return rc;
-    if ((rc = w_string(out, m->renderer_name))) return rc;
     if ((rc = w_u32(out, m->extent_w))) return rc;
     if ((rc = w_u32(out, m->extent_h))) return rc;
-    if ((rc = w_u32(out, m->fps))) return rc;
-    if ((rc = w_u32(out, m->test_pattern))) return rc;
-    if ((rc = w_string(out, m->resource_kind))) return rc;
-    if ((rc = w_string(out, m->resource_primary))) return rc;
-    if ((rc = w_kv_list(out, &m->resource_extras))) return rc;
+    if ((rc = w_u32(out, m->extent_mode))) return rc;
     if ((rc = w_kv_list(out, &m->settings))) return rc;
     return WW_OK;
 }
@@ -409,14 +404,9 @@ int ww_req_init_decode(const uint8_t *buf, size_t len, ww_req_init_t *out) {
     ww_rd_t r = { buf, 0, len };
     int rc;
     if ((rc = rd_u32(&r, &out->spawn_version))) goto fail;
-    if ((rc = rd_string(&r, &out->renderer_name))) goto fail;
     if ((rc = rd_u32(&r, &out->extent_w))) goto fail;
     if ((rc = rd_u32(&r, &out->extent_h))) goto fail;
-    if ((rc = rd_u32(&r, &out->fps))) goto fail;
-    if ((rc = rd_u32(&r, &out->test_pattern))) goto fail;
-    if ((rc = rd_string(&r, &out->resource_kind))) goto fail;
-    if ((rc = rd_string(&r, &out->resource_primary))) goto fail;
-    if ((rc = rd_kv_list(&r, &out->resource_extras))) goto fail;
+    if ((rc = rd_u32(&r, &out->extent_mode))) goto fail;
     if ((rc = rd_kv_list(&r, &out->settings))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
@@ -431,10 +421,6 @@ fail:
 }
 
 void ww_req_init_free(ww_req_init_t *m) {
-    free(m->renderer_name); m->renderer_name = NULL;
-    free(m->resource_kind); m->resource_kind = NULL;
-    free(m->resource_primary); m->resource_primary = NULL;
-    free_kv_list(&m->resource_extras);
     free_kv_list(&m->settings);
 }
 
@@ -447,7 +433,6 @@ int ww_req_apply_settings_encode(const ww_req_apply_settings_t *m, ww_buf_t *out
     int rc;
     (void)m;
     if ((rc = w_kv_list(out, &m->settings))) return rc;
-    if ((rc = w_u32(out, m->fps))) return rc;
     return WW_OK;
 }
 
@@ -456,7 +441,6 @@ int ww_req_apply_settings_decode(const uint8_t *buf, size_t len, ww_req_apply_se
     ww_rd_t r = { buf, 0, len };
     int rc;
     if ((rc = rd_kv_list(&r, &out->settings))) goto fail;
-    if ((rc = rd_u32(&r, &out->fps))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -630,8 +614,6 @@ int ww_req_negotiate_buffers_encode(const ww_req_negotiate_buffers_t *m, ww_buf_
     if ((rc = w_u32(out, m->sync_mode))) return rc;
     if ((rc = w_u32(out, m->color))) return rc;
     if ((rc = w_u32(out, m->mem_hint))) return rc;
-    if ((rc = w_u32(out, m->extent_w))) return rc;
-    if ((rc = w_u32(out, m->extent_h))) return rc;
     if ((rc = w_u32(out, m->count))) return rc;
     if ((rc = w_u32(out, m->path))) return rc;
     if ((rc = w_u32(out, m->mem_source))) return rc;
@@ -648,8 +630,6 @@ int ww_req_negotiate_buffers_decode(const uint8_t *buf, size_t len, ww_req_negot
     if ((rc = rd_u32(&r, &out->sync_mode))) goto fail;
     if ((rc = rd_u32(&r, &out->color))) goto fail;
     if ((rc = rd_u32(&r, &out->mem_hint))) goto fail;
-    if ((rc = rd_u32(&r, &out->extent_w))) goto fail;
-    if ((rc = rd_u32(&r, &out->extent_h))) goto fail;
     if ((rc = rd_u32(&r, &out->count))) goto fail;
     if ((rc = rd_u32(&r, &out->path))) goto fail;
     if ((rc = rd_u32(&r, &out->mem_source))) goto fail;

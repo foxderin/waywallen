@@ -358,6 +358,68 @@ impl SourceManager {
         self.entries.iter().find(|e| e.id == id)
     }
 
+    /// Ask the plugin that produced `entry` for the CLI `extras`
+    /// dictionary the daemon should pass to the renderer subprocess
+    /// at spawn time (under SPAWN_VERSION 3 these become `--<key>
+    /// <value>` argv after `--ipc <socket>`).
+    ///
+    /// The Lua plugin exports `extras(entry: table) -> table` returning
+    /// a flat `{string -> string}` map. Plugins that haven't migrated
+    /// fall through to `entry.metadata`, preserving the v6→v3
+    /// transition path.
+    ///
+    /// `extras["path"]` is mandatory in the result — that's the
+    /// canonical resource path. The daemon does NOT enforce that here;
+    /// renderers fail at spawn-time with `--path <file> is required`
+    /// if the plugin omitted it.
+    pub fn call_extras(
+        &self,
+        plugin_name: &str,
+        entry: &WallpaperEntry,
+    ) -> Result<HashMap<String, String>> {
+        let key = self
+            .plugins
+            .get(plugin_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown source plugin: {plugin_name}"))?;
+        let module: LuaTable = self.lua.registry_value(key)?;
+        let extras_fn: Option<LuaFunction> = module.get("extras").ok();
+        let Some(extras_fn) = extras_fn else {
+            // Legacy path: plugin hasn't migrated to extras(entry)
+            // yet. Fall back to entry.metadata until Phase 6 finishes
+            // and every shipped plugin exports extras().
+            log::debug!(
+                "source plugin '{plugin_name}' has no extras() function; \
+                 using legacy entry.metadata as CLI extras"
+            );
+            return Ok(entry.metadata.clone());
+        };
+        let entry_tbl = self.lua.create_table()?;
+        entry_tbl.set("id", entry.id.clone())?;
+        entry_tbl.set("name", entry.name.clone())?;
+        entry_tbl.set("wp_type", entry.wp_type.clone())?;
+        entry_tbl.set("resource", entry.resource.clone())?;
+        if let Some(p) = &entry.preview {
+            entry_tbl.set("preview", p.clone())?;
+        }
+        // Forward the (still-existing) metadata table so plugins that
+        // wrote secondary keys at scan-time can read them back here.
+        let md_tbl = self.lua.create_table()?;
+        for (k, v) in &entry.metadata {
+            md_tbl.set(k.clone(), v.clone())?;
+        }
+        entry_tbl.set("metadata", md_tbl)?;
+        if let Some(d) = &entry.description {
+            entry_tbl.set("description", d.clone())?;
+        }
+        let result: LuaTable = extras_fn.call(entry_tbl)?;
+        let mut out = HashMap::new();
+        for pair in result.pairs::<String, String>() {
+            let (k, v) = pair?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+
     /// Ask every plugin that exports `auto_detect(ctx)` to probe
     /// well-known filesystem locations and report any that exist.
     /// Returns `(plugin_name -> [paths])`. Plugins without an

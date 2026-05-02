@@ -44,8 +44,8 @@ auto map_to_layout(const QVariantMap& m) -> proto::LayoutPrefs {
 
 auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     QVariantMap m;
-    m[u"defaultWidth"_s]  = g.defaultWidth();
-    m[u"defaultHeight"_s] = g.defaultHeight();
+    m[u"targetExtent"_s]     = g.targetExtent();
+    m[u"renderSizePolicy"_s] = static_cast<int>(g.renderSizePolicy());
     if (g.hasLayoutDefaults()) {
         m[u"layoutDefaults"_s] = layout_to_map(g.layoutDefaults());
     }
@@ -67,8 +67,9 @@ auto plugins_to_map(const proto::SettingsGetResponse::PluginsEntry& src) -> QVar
 
 auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     proto::GlobalSettings g;
-    g.setDefaultWidth(m.value(u"defaultWidth"_s).toUInt());
-    g.setDefaultHeight(m.value(u"defaultHeight"_s).toUInt());
+    g.setTargetExtent(m.value(u"targetExtent"_s).toUInt());
+    g.setRenderSizePolicy(
+        static_cast<proto::RenderSizePolicy>(m.value(u"renderSizePolicy"_s).toInt()));
     // Round-trip layout_defaults so a single-plugin SettingsSet doesn't
     // wipe the daemon's current LayoutPrefs (fillmode / align /
     // clear_rgba). UI never edits these — it just forwards them.

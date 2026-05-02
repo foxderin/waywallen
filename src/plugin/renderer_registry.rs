@@ -281,8 +281,7 @@ pub fn validate_metadata(
             } else if !allowed.contains(k.as_str()) {
                 warnings.push(format!(
                     "unknown metadata key '{k}' for renderer '{}' \
-                     (not 'path', not in extras, not in settings); \
-                     Step 3 will turn into error",
+                     (not 'path', not in extras, not in settings);",
                     def.name
                 ));
             }

@@ -12,10 +12,12 @@ namespace waywallen
 {
 
 /// Fetch the daemon's persisted settings. `global` is a flat
-/// QVariantMap (defaultWidth/defaultHeight); `plugins` is keyed by
-/// plugin name with each value a `{key: stringValue}` QVariantMap.
-/// Both are wire-string typed — the QML form coerces values per the
-/// matching `SettingSchema.type`.
+/// QVariantMap (`targetExtent`, `renderSizePolicy`, `layoutDefaults`);
+/// `renderSizePolicy` is the int value of
+/// `control::v1::RenderSizePolicy`. `plugins` is keyed by plugin name
+/// with each value a `{key: stringValue}` QVariantMap. Plugin values
+/// are wire-string typed — the QML form coerces per the matching
+/// `SettingSchema.type`.
 export class SettingsGetQuery : public Query, public QueryExtra<control::v1::Response, SettingsGetQuery> {
     Q_OBJECT
     QML_ELEMENT
@@ -40,8 +42,9 @@ private:
 };
 
 /// Apply a full-replace settings write. Caller must populate both
-/// `global` (QVariantMap with defaultWidth/defaultHeight; missing keys
-/// default to 0) and `plugins` (`{plugin: {key: stringValue}}`). The
+/// `global` (QVariantMap with `targetExtent`/`renderSizePolicy`;
+/// missing keys default to 0 / ONE_AXIS_AUTO) and `plugins`
+/// (`{plugin: {key: stringValue}}`). The
 /// daemon validates against the manifest schema (range, enum) and
 /// returns INVALID_ARGUMENT on rejection — surfaced via the standard
 /// Query `error` property.

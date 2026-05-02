@@ -10,6 +10,7 @@
 //     pipeline from any driver restriction on the export FBO).
 
 #include <waywallen-bridge/bridge.h>
+#include <waywallen-bridge/extent_resolve.h>
 #include <waywallen-bridge/pool.h>
 #include <waywallen-bridge/probe_egl.h>
 
@@ -26,6 +27,7 @@
 #include <errno.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
@@ -77,25 +79,22 @@ Options parse_args(int argc, char** argv) {
             if (i + 1 >= argc) return {};
             return argv[++i];
         };
+        // SPAWN_VERSION 3: video path arrives via `--path`;
+        // loop_file/hwdec/render_node come on Init.settings kv.
+        // `--no-hwdec`/`--no-loop`/`--render-node` remain as
+        // standalone-debug escape hatches (set before init).
         if (a == "--ipc") {
             o.ipc_path = next();
+        } else if (a == "--path") {
+            o.video_path = next();
         } else if (a == "--render-node") {
             o.render_node = next();
         } else if (a == "--no-hwdec") {
-            // Dev escape hatch — overrides Init.settings.hwdec.
             o.hwdec = false;
         } else if (a == "--no-loop") {
-            // Dev escape hatch — overrides Init.settings.loop_file.
             o.loop_file = false;
-        } else if (a == "--width" || a == "--height" || a == "--video"
-                   || a == "--path" || a == "--fps") {
-            // Legacy daemon double-send: skip flag + value.
-            (void)next();
-        } else if (a == "--test-pattern") {
-            // Bare bool — just skip flag.
         } else if (a.size() >= 2 && a[0] == '-' && a[1] == '-' && i + 1 < argc) {
-            // Unknown `--key value` pair from the daemon's argv —
-            // skip the value too (no bridge helper anymore).
+            // Tolerate other `--key value` extras by skipping the value.
             std::string nxt = argv[i + 1];
             if (!(nxt.size() >= 2 && nxt[0] == '-' && nxt[1] == '-')) ++i;
         }
@@ -590,8 +589,9 @@ void apply_control(HostState& s, MpvState& m, WakeState& wake,
             const char* val = as.settings.data[i].value;
             if (!key || !val) continue;
             const char* mpv_opt = nullptr;
-            if (std::strcmp(key, "loop_file") == 0)      mpv_opt = "loop-file";
-            else if (std::strcmp(key, "hwdec") == 0)     mpv_opt = "hwdec";
+            if (std::strcmp(key, "loop_file") == 0)  mpv_opt = "loop-file";
+            else if (std::strcmp(key, "hwdec") == 0) mpv_opt = "hwdec";
+            else if (std::strcmp(key, "fps") == 0)   mpv_opt = "container-fps-override";
             else {
                 std::fprintf(stderr,
                              "waywallen-mpv-renderer: ApplySettings: unknown key '%s'; ignoring\n",
@@ -606,23 +606,6 @@ void apply_control(HostState& s, MpvState& m, WakeState& wake,
                 std::fprintf(stderr,
                              "waywallen-mpv-renderer: mpv_set_property(%s=%s) rc=%d\n",
                              mpv_opt, val, rc);
-            }
-        }
-        if (as.fps != 0) {
-            // mpv's "container-fps-override" overrides the decoder's
-            // declared fps; "fps" itself is read-only on the playback
-            // side. The renderer's slot pacing is driven by mpv's
-            // render-context-update callback rather than a wall clock,
-            // so a fps change here is advisory — the consumer-side
-            // pacing still dominates. We log and let mpv decide.
-            std::string fps_str = std::to_string(as.fps);
-            char* mut_val = const_cast<char*>(fps_str.c_str());
-            int rc = mpv_set_property(m.mpv, "container-fps-override",
-                                      MPV_FORMAT_STRING, &mut_val);
-            if (rc < 0) {
-                std::fprintf(stderr,
-                             "waywallen-mpv-renderer: ApplySettings.fps=%u set failed rc=%d\n",
-                             as.fps, rc);
             }
         }
         ww_bridge_apply_settings_free(&as);
@@ -658,8 +641,6 @@ void apply_control(HostState& s, MpvState& m, WakeState& wake,
         d.sync_mode  = nb.sync_mode;
         d.color      = nb.color;
         d.mem_hint   = nb.mem_hint;
-        d.width      = nb.extent_w;
-        d.height     = nb.extent_h;
         d.count      = nb.count > 0 ? nb.count : SLOT_COUNT;
         if (d.count > SLOT_COUNT) d.count = SLOT_COUNT; // bridge currently caps at 8
         {
@@ -732,12 +713,15 @@ int main(int argc, char** argv) {
         die(std::string(reason) + " rc=" + std::to_string(rc));
     }
 
-    // Canonical resource key is "path" (v6); resource_primary holds
-    // the on-disk path.
-    opt.width  = init.extent_w;
-    opt.height = init.extent_h;
-    if (init.resource_primary && init.resource_primary[0])
-        opt.video_path = init.resource_primary;
+    // SPAWN_VERSION 3: video path arrives via CLI argv `--path`
+    // (already in opt.video_path). Init carries only extent +
+    // settings kv.
+    uint32_t init_extent_w    = init.extent_w;
+    uint32_t init_extent_h    = init.extent_h;
+    uint32_t init_extent_mode = init.extent_mode;
+    /* Sane placeholder until libmpv reports `dwidth`/`dheight`. */
+    opt.width  = init_extent_w  ? init_extent_w  : 1280u;
+    opt.height = init_extent_h  ? init_extent_h  : 720u;
 
     // settings → typed knobs. CLI escape hatches (--no-hwdec /
     // --no-loop) already applied in parse_args; only override when
@@ -766,7 +750,7 @@ int main(int argc, char** argv) {
     ww_bridge_init_free(&init);
 
     if (opt.video_path.empty())
-        die("Init.resource_primary (video path) is required");
+        die("--path <video-file> is required");
 
     GlCtx gl;
     init_egl(gl, opt);
@@ -784,6 +768,43 @@ int main(int argc, char** argv) {
     WakeState wake;
     MpvState  mpv;
     mpv_init(mpv, opt, wake);
+
+    /* Block until the first FILE_LOADED event so we can read the
+     * stream's native `dwidth`/`dheight` and resolve the daemon's
+     * extent hint against them. We do this before `advertise_caps`
+     * so the bridge pool, FBOs and consumer all agree on a single
+     * size from the start. A 5s timeout falls back to whatever
+     * placeholder is currently in `opt` and logs a warning — better
+     * to render at the wrong size than to hang the spawn. */
+    {
+        int64_t  native_w = 0, native_h = 0;
+        bool     loaded   = false;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!loaded && std::chrono::steady_clock::now() < deadline) {
+            mpv_event* ev = mpv_wait_event(mpv.mpv, 0.05);
+            if (!ev) continue;
+            if (ev->event_id == MPV_EVENT_NONE) continue;
+            if (ev->event_id == MPV_EVENT_SHUTDOWN) {
+                die("mpv shut down before FILE_LOADED");
+            }
+            if (ev->event_id == MPV_EVENT_FILE_LOADED) {
+                mpv_get_property(mpv.mpv, "dwidth",  MPV_FORMAT_INT64, &native_w);
+                mpv_get_property(mpv.mpv, "dheight", MPV_FORMAT_INT64, &native_h);
+                loaded = true;
+            }
+        }
+        if (!loaded) {
+            std::fprintf(stderr,
+                         "waywallen-mpv-renderer: timeout waiting for "
+                         "FILE_LOADED; using daemon extent hint as-is "
+                         "(%ux%u)\n", opt.width, opt.height);
+        } else {
+            ww_resolve_extent(init_extent_w, init_extent_h, init_extent_mode,
+                              static_cast<uint32_t>(native_w > 0 ? native_w : 0),
+                              static_cast<uint32_t>(native_h > 0 ? native_h : 0),
+                              &opt.width, &opt.height);
+        }
+    }
 
     // Hand the EGL display + drm_fd off to the bridge pool. Bridge
     // takes ownership of drm_fd (we won't close it on destroy_gl).

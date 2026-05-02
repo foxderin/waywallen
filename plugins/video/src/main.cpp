@@ -11,6 +11,7 @@
 // unchanged from Iter 0.
 
 #include <waywallen-bridge/bridge.h>
+#include <waywallen-bridge/extent_resolve.h>
 #include <waywallen-bridge/ipc_v1.h>
 #include <waywallen-bridge/pool.h>
 #include <waywallen-bridge/probe_vk.h>
@@ -56,6 +57,10 @@ struct Options {
     std::exit(1);
 }
 
+// SPAWN_VERSION 3: video path arrives via `--path`; everything else
+// (loop_file, hwdec, render_node, fps, volume) rides on Init.settings
+// kv. Keep `--no-loop` / `--render-node` as standalone-debug escape
+// hatches (set them before init; daemon doesn't emit them).
 Options parse_args(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
@@ -65,15 +70,12 @@ Options parse_args(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--ipc")              o.ipc_path = next();
+        else if (a == "--path")        o.video_path = next();
         else if (a == "--no-loop")     o.loop_file = false;
         else if (a == "--render-node") o.render_node = next();
         else if (a == "--selftest")    { o.selftest = true; o.video_path = next(); }
-        else if (a == "--width" || a == "--height" || a == "--video"
-                 || a == "--path" || a == "--fps") {
-            (void)next();
-        } else if (a == "--test-pattern") {
-            // Bare bool — skip.
-        } else if (a.size() >= 2 && a[0] == '-' && a[1] == '-' && i + 1 < argc) {
+        // Tolerate other `--key value` extras by skipping the value.
+        else if (a.size() >= 2 && a[0] == '-' && a[1] == '-' && i + 1 < argc) {
             std::string nxt = argv[i + 1];
             if (!(nxt.size() >= 2 && nxt[0] == '-' && nxt[1] == '-')) ++i;
         }
@@ -163,8 +165,6 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         d.sync_mode   = nb.sync_mode;
         d.color       = nb.color;
         d.mem_hint    = nb.mem_hint;
-        d.width       = nb.extent_w;
-        d.height      = nb.extent_h;
         d.count       = nb.count > 0 ? nb.count : SLOT_COUNT;
         if (d.count > SLOT_COUNT) d.count = SLOT_COUNT;
         {
@@ -371,10 +371,12 @@ int main(int argc, char** argv) {
         ww_bridge_init_free(&init);
         die(std::string(reason) + " rc=" + std::to_string(rc));
     }
-    opt.width  = init.extent_w;
-    opt.height = init.extent_h;
-    if (init.resource_primary && init.resource_primary[0])
-        opt.video_path = init.resource_primary;
+    uint32_t init_extent_w    = init.extent_w;
+    uint32_t init_extent_h    = init.extent_h;
+    uint32_t init_extent_mode = init.extent_mode;
+    // SPAWN_VERSION 3: video path arrives via CLI argv `--path`
+    // (already in opt.video_path). Init carries only extent + the
+    // resolved settings kv list.
     if (const char* v = kv_get(init.settings, "loop_file")) {
         opt.loop_file = !(std::strcmp(v, "no") == 0);
     }
@@ -386,7 +388,23 @@ int main(int argc, char** argv) {
     }
     ww_bridge_init_free(&init);
     if (opt.video_path.empty())
-        die("Init.resource_primary (video path) is required");
+        die("--path <video-file> is required");
+
+    /* Probe the file's native dimensions before allocating any GPU
+     * state, then resolve the daemon's extent hint against them.
+     * `Producer::create_with_render_node` needs the final size up
+     * front, so this has to happen here in main, not inside
+     * VideoDecoder. */
+    uint32_t native_w = 0, native_h = 0;
+    {
+        waywallen::ffvk::DecodeError perr;
+        if (!waywallen::ffvk::VideoDecoder::probe_native(
+                opt.video_path, &native_w, &native_h, &perr)) {
+            die("probe_native " + opt.video_path + ": " + perr.message);
+        }
+    }
+    ww_resolve_extent(init_extent_w, init_extent_h, init_extent_mode,
+                      native_w, native_h, &opt.width, &opt.height);
 
     /* NV12 chroma is 4:2:0 → both extents must be even. The decoder
      * rounds up internally too; do it here so all our state agrees. */

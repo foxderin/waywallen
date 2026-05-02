@@ -208,6 +208,36 @@ bool seek_to_start(VideoDecoder::State& st) {
 
 } // namespace
 
+bool VideoDecoder::probe_native(const std::string& path,
+                                uint32_t* native_w, uint32_t* native_h,
+                                DecodeError* err) {
+    *native_w = 0;
+    *native_h = 0;
+    AVFormatContext* raw_fmt = nullptr;
+    if (int rc = avformat_open_input(&raw_fmt, path.c_str(), nullptr, nullptr);
+        rc < 0) {
+        fail(err, "avformat_open_input: " + av_err_str(rc));
+        return false;
+    }
+    std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)> fmt(
+        raw_fmt,
+        [](AVFormatContext* p) { if (p) avformat_close_input(&p); });
+    if (int rc = avformat_find_stream_info(fmt.get(), nullptr); rc < 0) {
+        fail(err, "avformat_find_stream_info: " + av_err_str(rc));
+        return false;
+    }
+    int idx = av_find_best_stream(fmt.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (idx < 0) { fail(err, "no video stream in file"); return false; }
+    AVCodecParameters* par = fmt->streams[idx]->codecpar;
+    if (par->width <= 0 || par->height <= 0) {
+        fail(err, "video stream has invalid native dimensions");
+        return false;
+    }
+    *native_w = static_cast<uint32_t>(par->width);
+    *native_h = static_cast<uint32_t>(par->height);
+    return true;
+}
+
 VideoDecoder::~VideoDecoder() = default;
 
 std::unique_ptr<VideoDecoder>

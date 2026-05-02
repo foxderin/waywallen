@@ -246,6 +246,29 @@ fn layout_override_to_pb(p: &crate::settings::DisplayPrefs) -> pb::LayoutOverrid
     }
 }
 
+fn render_size_policy_to_pb(p: crate::settings::RenderSizePolicy) -> pb::RenderSizePolicy {
+    use crate::settings::RenderSizePolicy as P;
+    match p {
+        P::Native => pb::RenderSizePolicy::Native,
+        P::OneAxisAuto => pb::RenderSizePolicy::OneAxisAuto,
+        P::OneAxisWidth => pb::RenderSizePolicy::OneAxisWidth,
+        P::OneAxisHeight => pb::RenderSizePolicy::OneAxisHeight,
+    }
+}
+
+fn render_size_policy_from_pb(v: i32) -> crate::settings::RenderSizePolicy {
+    use crate::settings::RenderSizePolicy as P;
+    match pb::RenderSizePolicy::try_from(v) {
+        Ok(pb::RenderSizePolicy::Native) => P::Native,
+        Ok(pb::RenderSizePolicy::OneAxisWidth) => P::OneAxisWidth,
+        Ok(pb::RenderSizePolicy::OneAxisHeight) => P::OneAxisHeight,
+        // `OneAxisAuto` is the proto-default (tag 0) and the fallback
+        // when an unknown enum value lands on a newer wire from an
+        // older daemon.
+        _ => P::OneAxisAuto,
+    }
+}
+
 fn fillmode_to_pb(fm: crate::display_layout::FillMode) -> pb::FillMode {
     use crate::display_layout::FillMode as F;
     match fm {
@@ -455,8 +478,10 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
             Some(pb::Event {
                 payload: Some(pb::event::Payload::SettingsChanged(pb::SettingsChanged {
                     global: Some(pb::GlobalSettings {
-                        default_width: snap.global.default_width,
-                        default_height: snap.global.default_height,
+                        target_extent: snap.global.target_extent,
+                        render_size_policy: render_size_policy_to_pb(
+                            snap.global.render_size_policy,
+                        ) as i32,
                         layout_defaults: Some(layout_defaults),
                     }),
                     plugins: snap
@@ -500,9 +525,11 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
         Req::RendererSpawn(r) => {
             let spawn_req = renderer_manager::SpawnRequest {
                 wp_type: if r.wp_type.is_empty() { "scene".into() } else { r.wp_type },
+                extras: r.metadata.clone(),
                 metadata: r.metadata,
                 width: r.width,
                 height: r.height,
+                extent_mode: crate::settings::extent_mode::AS_GIVEN,
                 fps: r.fps,
                 test_pattern: false,
                 renderer_name: None,
@@ -833,14 +860,17 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 }
                 def.name.clone()
             };
-            // Resolution comes from settings.global. fps is a per-plugin
+            // Render-target hint comes from settings.global. The
+            // policy translates `target_extent` into the wire-level
+            // `(extent_w, extent_h, extent_mode)` triple — see
+            // `crate::settings::resolve_extent`. fps is a per-plugin
             // concern: pulled out of `[plugin.<name>].fps` if present,
             // otherwise hardcoded to 30 as a safe last resort. The
             // remaining `[plugin.<name>]` keys flow into spawn metadata
             // as baseline kv; per-wallpaper metadata wins on collisions.
             let g = state.settings.global();
-            let width = g.default_width;
-            let height = g.default_height;
+            let (width, height, extent_mode) =
+                crate::settings::resolve_extent(g.render_size_policy, g.target_extent);
 
             let plugin_kv = state
                 .settings
@@ -861,11 +891,35 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
             // Wallpaper-supplied keys override plugin defaults.
             metadata.extend(entry.metadata.clone());
 
+            // SPAWN_VERSION 3: extras (canonical `path` + manifest
+            // whitelist like `assets`/`workshop_id`) ride as CLI
+            // argv. Ask the source plugin for the dict via its
+            // `extras(entry)` Lua callback; plugins that haven't
+            // migrated yet fall through to `entry.metadata` inside
+            // `call_extras`, preserving back-compat.
+            let extras = match state
+                .source_manager
+                .lock()
+                .await
+                .call_extras(&entry.plugin_name, &entry)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!(
+                        "source_plugin '{}'.extras() failed: {e}; using entry.metadata fallback",
+                        entry.plugin_name
+                    );
+                    entry.metadata.clone()
+                }
+            };
+
             let spawn_req = renderer_manager::SpawnRequest {
                 wp_type: entry.wp_type.clone(),
+                extras,
                 metadata,
                 width,
                 height,
+                extent_mode,
                 fps,
                 test_pattern: false,
                 // Pin reuse + spawn to the explicit pick when the
@@ -910,7 +964,28 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                     }
                     existing_id
                 }
-                None => match state.renderer_manager.spawn(spawn_req).await {
+                None => {
+                    // No reuse — a fresh renderer is about to spawn.
+                    // Stop any pre-existing renderer whose every
+                    // enabled display link is in the relink target
+                    // set BEFORE the new one is spawned, so peak GPU
+                    // memory stays at one working set's worth instead
+                    // of overlapping two.
+                    let target: Option<&[u64]> = if r.display_ids.is_empty() {
+                        None
+                    } else {
+                        Some(&r.display_ids)
+                    };
+                    let to_stop = state.router.renderers_fully_replaced_by(target).await;
+                    if !to_stop.is_empty() {
+                        log::info!(
+                            "wallpaper_apply: stopping {} fully-replaced renderer(s) before spawn: {:?}",
+                            to_stop.len(),
+                            to_stop,
+                        );
+                        state.router.stop_renderers(&to_stop).await;
+                    }
+                    match state.renderer_manager.spawn(spawn_req).await {
                     Ok(new_id) => {
                         if let Some(handle) = state.renderer_manager.get(&new_id).await {
                             state.router.register_renderer(handle).await;
@@ -939,6 +1014,7 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                             format!("spawn failed: {e}"),
                         );
                     }
+                }
                 },
             };
 
@@ -997,8 +1073,10 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 rid,
                 Res::SettingsGet(pb::SettingsGetResponse {
                     global: Some(pb::GlobalSettings {
-                        default_width: snap.global.default_width,
-                        default_height: snap.global.default_height,
+                        target_extent: snap.global.target_extent,
+                        render_size_policy: render_size_policy_to_pb(
+                            snap.global.render_size_policy,
+                        ) as i32,
                         layout_defaults: Some(layout_defaults),
                     }),
                     plugins: snap
@@ -1067,8 +1145,9 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
             let prev_layout = state.settings.snapshot().global.layout.clone();
             state.settings.update(|s| {
                 if let Some(g) = r.global.as_ref() {
-                    s.global.default_width = g.default_width;
-                    s.global.default_height = g.default_height;
+                    s.global.target_extent = g.target_extent;
+                    s.global.render_size_policy =
+                        render_size_policy_from_pb(g.render_size_policy);
                     if let Some(ld) = g.layout_defaults.as_ref() {
                         if let Some(fm) = fillmode_from_pb(ld.fillmode) {
                             s.global.layout.fillmode = fm;
@@ -1161,7 +1240,17 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                     if handle.name != plugin_name {
                         continue;
                     }
-                    let kv: Vec<(String, String)> = delta.clone().into_iter().collect();
+                    // Respect per-instance overrides: keys the user
+                    // has set specifically on this renderer must not
+                    // be clobbered by a plugin-default change.
+                    let kv: Vec<(String, String)> = delta
+                        .iter()
+                        .filter(|(k, _)| !handle.has_override(k))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if kv.is_empty() {
+                        continue;
+                    }
                     if let Err(e) = state
                         .renderer_manager
                         .send_apply_settings(&id, kv, None)

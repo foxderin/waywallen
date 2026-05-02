@@ -374,22 +374,38 @@ void ww_bridge_control_free(ww_bridge_control_t *msg);
  * the wire shape of `ww_req_init_t` (or `ww_bridge_init_t`) changes;
  * `ww_bridge_recv_init` validates the value sent by the daemon
  * matches and returns -EPROTO otherwise. */
-#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION 1u
+#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION 3u
 
-/* Caller-friendly view of the typed Init payload. Strings and kv
- * lists are heap-owned (transferred from the underlying
+/* Interpretation of the daemon's `extent_w`/`extent_h` hints in
+ * `ww_bridge_init_t`. See <waywallen-bridge/extent_resolve.h> for the
+ * shared resolver every renderer should call after it knows its
+ * content's intrinsic (native) size. */
+typedef enum ww_extent_mode {
+    /* `0` on either axis = "renderer fills this in from native"; both
+     * 0 = fully native; both >0 = exact size requested. */
+    WW_EXTENT_MODE_AS_GIVEN    = 0,
+    /* The renderer chooses which native axis is shorter and fits it
+     * to `max(extent_w, extent_h)`; the other axis scales to keep
+     * the native aspect ratio. Used when the user picks a target
+     * pixel size without specifying width vs height. */
+    WW_EXTENT_MODE_FIT_SHORTER = 1,
+} ww_extent_mode_t;
+
+/* Caller-friendly view of the typed Init payload (SPAWN_VERSION 3).
+ * The kv list is heap-owned (transferred from the underlying
  * `ww_req_init_t` decode); call `ww_bridge_init_free` exactly once
- * after consumption. */
+ * after consumption.
+ *
+ * Resource path + plugin-specific extras (assets, workshop_id, …)
+ * arrive on the renderer's CLI argv, NOT in this struct. fps,
+ * test_pattern, volume, loop_file, hwdec, render_node, … all live
+ * as keys in `settings` whenever the renderer's manifest declares
+ * them; no scalar gets promoted to a typed wire field. */
 typedef struct ww_bridge_init {
     uint32_t      spawn_version;
-    char         *renderer_name;     /* heap-owned, NUL-terminated */
     uint32_t      extent_w;
     uint32_t      extent_h;
-    uint32_t      fps;
-    int           test_pattern;      /* 0/1 — XML lacks bool */
-    char         *resource_kind;     /* heap-owned, NUL-terminated */
-    char         *resource_primary;  /* heap-owned, NUL-terminated */
-    ww_kv_list_t  resource_extras;
+    uint32_t      extent_mode;       /* ww_extent_mode_t */
     ww_kv_list_t  settings;
 } ww_bridge_init_t;
 
@@ -428,17 +444,13 @@ int ww_bridge_send_init_nack(int sock,
 
 
 /* -----------------------------------------------------------------------
- * ApplySettings (v5) — runtime hot-reload of plugin settings
+ * ApplySettings — runtime hot-reload of plugin settings (SPAWN_VERSION 3)
  *
  * The daemon fires `apply_settings` over a live renderer's IPC socket
- * whenever a non-identity plugin setting (or fps) changes — e.g.
- * `loop_file` / `hwdec` for mpv, `volume` for wescene. Renderers peel
- * the typed view from the generic control message via
- * `ww_bridge_apply_settings_from_control` and dispatch each kv pair
- * however they choose; non-handled keys should warn-log.
- *
- * `fps == 0` is the "unset" sentinel — the daemon omits a fps change
- * when `0` lands on the wire.
+ * whenever a non-identity plugin setting changes — e.g. `loop_file` /
+ * `hwdec` for mpv, `volume` for wescene, `fps` for any plugin whose
+ * manifest declares it. The whole payload is a kv list (same shape
+ * as `init.settings`); no typed scalars are promoted.
  * ----------------------------------------------------------------------- */
 
 /* Caller-friendly view of the apply_settings payload. Backing storage
@@ -448,7 +460,6 @@ int ww_bridge_send_init_nack(int sock,
  * exactly once (NOT `ww_bridge_control_free`) when done. */
 typedef struct ww_bridge_apply_settings {
     ww_kv_list_t settings;
-    uint32_t     fps;
 } ww_bridge_apply_settings_t;
 
 /* Peel the apply_settings typed view out of a generic control message.

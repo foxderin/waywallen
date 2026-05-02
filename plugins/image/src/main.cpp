@@ -36,8 +36,12 @@ namespace {
 struct Options {
     std::string ipc_path;
     std::string image_path;
+    /* Daemon-supplied size hint. After decode they are overwritten with
+     * the resolved render extent (`ww_resolve_extent`). */
     uint32_t    width { 1920 };
     uint32_t    height { 1080 };
+    /* Wire-level interpretation of `width`/`height`. `0` = AS_GIVEN. */
+    uint32_t    extent_mode { 0 };
     bool        decode_only { false };
     bool        vulkan_probe { false };
     // Test hook: probe the picked Vulkan device for supported (fourcc,
@@ -53,13 +57,10 @@ struct Options {
     std::exit(1);
 }
 
-// Step 3: spawn-time params (width/height/image path) come from the
-// daemon's typed Init message after we connect, not from argv. Only
-// `--ipc` plus the standalone-debug flags (`--decode-only`,
-// `--vulkan-probe`, `--print-caps`) are still parsed here. Unknown
-// args from the daemon's legacy double-send are silently ignored:
-// daemon keeps emitting `--width N --height N --image PATH ...` until
-// every renderer (incl. wescene in OWE) has migrated.
+// SPAWN_VERSION 3: argv carries the canonical `--path` for the image
+// resource plus `--ipc`. Per-plugin runtime settings (fps, etc.) come
+// in via `Init.settings` kv. Standalone-debug flags (`--decode-only`,
+// `--vulkan-probe`, `--print-caps`) are still parsed here.
 Options parse_args(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
@@ -68,23 +69,13 @@ Options parse_args(int argc, char** argv) {
             if (i + 1 >= argc) return {};
             return argv[++i];
         };
-        if (a == "--ipc")              o.ipc_path = next();
-        else if (a == "--decode-only") o.decode_only = true;
+        if (a == "--ipc")               o.ipc_path = next();
+        else if (a == "--path")         o.image_path = next();
+        else if (a == "--decode-only")  o.decode_only = true;
         else if (a == "--vulkan-probe") o.vulkan_probe = true;
-        else if (a == "--print-caps")  o.print_caps = true;
-        else if (a == "--width" || a == "--height" || a == "--image" || a == "--path") {
-            // Legacy daemon double-send — ignore both flag and value.
-            (void)next();
-        }
-        else if (a == "--test-pattern" || a == "--fps") {
-            // Legacy daemon double-send. `--test-pattern` is a bare
-            // bool flag (no value); `--fps N` carries a value but the
-            // image renderer doesn't use it.
-            if (a == "--fps") (void)next();
-        }
-        // Anything else with a `--key value` shape: skip the value to
-        // stay tolerant of the legacy daemon argv. Bare `--flag` is
-        // simply ignored. (No bridge helper anymore.)
+        else if (a == "--print-caps")   o.print_caps = true;
+        // Tolerate other `--key value` extras (none defined for image
+        // today) by skipping their value.
         else if (a.size() >= 2 && a[0] == '-' && a[1] == '-' && i + 1 < argc) {
             std::string nxt = argv[i + 1];
             if (!(nxt.size() >= 2 && nxt[0] == '-' && nxt[1] == '-')) ++i;
@@ -309,8 +300,6 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         d.sync_mode   = nb.sync_mode;
         d.color       = nb.color;
         d.mem_hint    = nb.mem_hint;
-        d.width       = nb.extent_w;
-        d.height      = nb.extent_h;
         /* Static image: one slot is enough. */
         d.count       = 1;
         {
@@ -537,7 +526,8 @@ int main(int argc, char** argv) {
         if (opt.image_path.empty()) die("--decode-only requires --image");
         ww_image::DecodeError derr;
         ww_image::RgbaBuf buf =
-            ww_image::decode_to_rgba(opt.image_path, opt.width, opt.height, &derr);
+            ww_image::decode_to_rgba(opt.image_path, opt.width, opt.height,
+                                     /* extent_mode = */ 0, &derr);
         if (buf.data.empty()) {
             std::fprintf(stderr,
                          "waywallen-image-renderer: decode failed: %s\n",
@@ -586,20 +576,27 @@ int main(int argc, char** argv) {
         die(std::string(reason) + " rc=" + std::to_string(rc));
     }
 
-    // Canonical resource key is "path" (v6); resource_primary holds
-    // the on-disk path.
-    opt.width      = init.extent_w;
-    opt.height     = init.extent_h;
-    if (init.resource_primary && init.resource_primary[0])
-        opt.image_path = init.resource_primary;
+    // SPAWN_VERSION 3: image path arrives via CLI argv `--path`
+    // (already parsed into opt.image_path). Init carries only extent.
+    opt.width       = init.extent_w;
+    opt.height      = init.extent_h;
+    opt.extent_mode = init.extent_mode;
+    // No settings keys consumed by the image renderer today (its
+    // schema declares fps, but the image plugin doesn't act on it).
     ww_bridge_init_free(&init);
 
     /* --- Decode + Vulkan setup --- */
-    if (opt.image_path.empty()) die("Init.resource_primary (image path) is required");
+    if (opt.image_path.empty()) die("--path <image-file> is required");
     ww_image::DecodeError derr;
     ww_image::RgbaBuf rgba_buf = ww_image::decode_to_rgba(
-        opt.image_path, opt.width, opt.height, &derr);
+        opt.image_path, opt.width, opt.height, opt.extent_mode, &derr);
     if (rgba_buf.data.empty()) die("decode " + opt.image_path + ": " + derr.message);
+
+    /* `decode_to_rgba` resolved the daemon's hint against the image's
+     * native size; from here on we work with the resolved render
+     * extent. */
+    opt.width  = rgba_buf.width;
+    opt.height = rgba_buf.height;
 
     std::string verr;
     auto producer = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);

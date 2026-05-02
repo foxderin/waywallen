@@ -77,4 +77,5 @@ using proto::SettingsChanged;
 using proto::LayoutPrefs;
 using proto::FillModeGadget::FillMode;
 using proto::AlignGadget::Align;
+using proto::RenderSizePolicyGadget::RenderSizePolicy;
 } // namespace waywallen::control::v1

@@ -185,7 +185,12 @@ static int validate_directive(const ww_pool_t *p,
                               const ww_pool_directive_t *d) {
     if (!d) return -EINVAL;
     if (d->count == 0 || d->count > WW_POOL_MAX_SLOTS) return -EINVAL;
-    if (d->width == 0 || d->height == 0) return -EINVAL;
+    /* `d->width`/`d->height` are no longer caller-controlled — the
+     * pool sizes slots from `probe_width/probe_height` (the renderer's
+     * actual render extent). Validation here would just second-guess
+     * the renderer; reject only if the pool itself never advertised
+     * dims (caller forgot to call `advertise_caps`). */
+    if (p->probe_width == 0 || p->probe_height == 0) return -EINVAL;
 
     switch (d->category) {
     case WW_PATH_OPTIMIZED_SAME_DEVICE:
@@ -400,6 +405,17 @@ int ww_bridge_pool_apply_directive(ww_pool_t                 *pool,
     /* Tear down existing slots before re-allocating. */
     teardown_slots(pool);
     pool->cur          = *directive;
+    /* The renderer is the authority on render-target extent — it
+     * already resolved the daemon's policy hint against its content's
+     * intrinsic size when it called `advertise_caps`, and its render
+     * loop is producing frames at exactly `probe_width × probe_height`.
+     * The daemon's `negotiate_buffers` only carries (fourcc, modifier,
+     * sync, color, mem_hint) decisions; its `extent_w/h` field is
+     * just an echo of what it sent in `Init` and isn't authoritative
+     * here. Override with the renderer's choice so dmabuf slots
+     * match the frames being put into them. */
+    if (pool->probe_width  > 0) pool->cur.width  = pool->probe_width;
+    if (pool->probe_height > 0) pool->cur.height = pool->probe_height;
     pool->has_directive = true;
 
     /* Dry-run: try slot 0 first. */

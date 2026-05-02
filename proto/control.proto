@@ -552,9 +552,34 @@ message LibraryRemoved {
 // Settings
 // ---------------------------------------------------------------------------
 
+// How the daemon shapes the (extent_w, extent_h, extent_mode) hint it
+// hands to a renderer's Init request. Mirrors
+// `crate::settings::RenderSizePolicy`. The daemon does not know the
+// wallpaper's intrinsic resolution, so for everything except `NATIVE`
+// the renderer is responsible for filling the unspecified axis using
+// `<waywallen-bridge/extent_resolve.h>`.
+enum RenderSizePolicy {
+  // Reserve 0 for a default that survives proto3 wire skipping for
+  // older clients; `ONE_AXIS_AUTO` matches the daemon-side default.
+  RENDER_SIZE_POLICY_ONE_AXIS_AUTO    = 0;
+  RENDER_SIZE_POLICY_NATIVE           = 1;
+  RENDER_SIZE_POLICY_ONE_AXIS_WIDTH   = 2;
+  RENDER_SIZE_POLICY_ONE_AXIS_HEIGHT  = 3;
+}
+
 message GlobalSettings {
-  uint32 default_width  = 1;
-  uint32 default_height = 2;
+  // Tag 1 / 2 used to be `default_width`/`default_height`; replaced by
+  // `target_extent` + `render_size_policy` in v7. Keep the old tag
+  // numbers reserved so older clients don't accidentally re-bind them
+  // to incompatible meanings.
+  reserved 1, 2;
+  reserved "default_width", "default_height";
+
+  // Pixel value applied to whichever axis (or both) the policy
+  // designates. Ignored when `render_size_policy = NATIVE`.
+  uint32 target_extent = 4;
+  RenderSizePolicy render_size_policy = 5;
+
   // Note: fps is per-plugin (in PluginSettings) — different renderer
   // engines have different sane defaults, so it's not a global field.
   //
