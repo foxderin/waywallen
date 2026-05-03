@@ -5,7 +5,7 @@
 //! This module is the Rust daemon's counterpart to the C++ host program
 //! in `open-wallpaper-engine/host/`.
 
-use anyhow::{anyhow, Context, Result};
+use crate::error::{Error, Result, ResultExt};
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -520,12 +520,12 @@ impl RendererManager {
             Some(name) => self
                 .registry
                 .resolve_by_name(name)
-                .ok_or_else(|| anyhow!("unknown renderer '{}'", name))?
+                .ok_or_else(|| Error::RendererNotFound(name.to_string()))?
                 .clone(),
             None => self
                 .registry
                 .resolve(&req.wp_type)
-                .ok_or_else(|| anyhow!("no renderer registered for type '{}'", req.wp_type))?
+                .ok_or_else(|| Error::NoRendererForType(req.wp_type.clone()))?
                 .clone(),
         };
 
@@ -559,7 +559,9 @@ impl RendererManager {
             .await
             .map_err(|_| {
                 let _ = child.start_kill();
-                anyhow!("timed out waiting for waywallen-renderer to connect back")
+                Error::RendererSpawnFailed(
+                    "timed out waiting for waywallen-renderer to connect back".into(),
+                )
             })?
             .context("accept")?;
 
@@ -765,13 +767,13 @@ impl RendererManager {
         let handle = self
             .get(id)
             .await
-            .ok_or_else(|| anyhow!("unknown renderer: {id}"))?;
+            .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
         let sock = handle.sock.clone();
         let codec_res: Result<std::result::Result<(), CodecError>> =
             tokio::task::spawn_blocking(move || {
-                let guard = sock
-                    .lock()
-                    .map_err(|e| anyhow!("sock mutex poisoned: {e}"))?;
+                let guard = sock.lock().map_err(|e| {
+                    Error::RendererControlFailed(format!("sock mutex poisoned: {e}"))
+                })?;
                 Ok(send_control(&*guard, &msg, &[]))
             })
             .await
@@ -783,7 +785,7 @@ impl RendererManager {
                     log::warn!("renderer {id}: peer gone on send_control ({e}), evicting");
                     self.mark_dead(id);
                 }
-                Err(anyhow!("send_control: {e}"))
+                Err(Error::RendererControlFailed(format!("send_control: {e}")))
             }
         }
     }
@@ -800,7 +802,7 @@ impl RendererManager {
         let handle = self
             .get(id)
             .await
-            .ok_or_else(|| anyhow!("unknown renderer: {id}"))?;
+            .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
         // Idempotence: skip if we've already dispatched this exact scheme.
         if let Ok(guard) = handle.last_dispatched_scheme.lock() {
             if guard.as_ref() == Some(&scheme) {
@@ -853,7 +855,7 @@ impl RendererManager {
         let handle = self
             .get(id)
             .await
-            .ok_or_else(|| anyhow!("unknown renderer: {id}"))?;
+            .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
         // SPAWN_VERSION 3: ApplySettings is a pure kv list. fps is
         // just one of the kv keys (when the manifest declares it),
         // not a typed scalar. Fold the legacy `fps_change` arg into
@@ -916,7 +918,7 @@ impl RendererManager {
             let mut inner = self.inner.lock().await;
             inner.renderers.remove(id)
         }
-        .ok_or_else(|| anyhow!("unknown renderer: {id}"))?;
+        .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
 
         // Try a polite shutdown first. Ignore the result — we're going
         // to SIGKILL it anyway.
@@ -1297,8 +1299,10 @@ pub(crate) fn run_init_handshake(
     sock: &StdUnixStream,
     init: &ControlMsg,
 ) -> Result<DrmNode> {
-    send_control(sock, init, &[]).map_err(|e| anyhow!("send Init: {e}"))?;
-    let (evt, fds) = recv_event(sock).map_err(|e| anyhow!("recv Ready: {e}"))?;
+    send_control(sock, init, &[])
+        .map_err(|e| Error::RendererSpawnFailed(format!("send Init: {e}")))?;
+    let (evt, fds) =
+        recv_event(sock).map_err(|e| Error::RendererSpawnFailed(format!("recv Ready: {e}")))?;
     match evt {
         EventMsg::Ready {
             drm_render_major,
@@ -1316,14 +1320,13 @@ pub(crate) fn run_init_handshake(
             received_spawn_version,
             supported_spawn_version,
             reason,
-        } => Err(anyhow!(
+        } => Err(Error::RendererSpawnFailed(format!(
             "renderer rejected Init: {reason} (received spawn_version={received_spawn_version}, \
              supported={supported_spawn_version})"
-        )),
-        other => Err(anyhow!(
-            "host emitted {:?} before Ready; aborting spawn",
-            other
-        )),
+        ))),
+        other => Err(Error::RendererSpawnFailed(format!(
+            "host emitted {other:?} before Ready; aborting spawn"
+        ))),
     }
 }
 

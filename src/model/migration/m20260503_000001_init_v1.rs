@@ -1,3 +1,16 @@
+//! Initial schema for `waywallen-v1.db`.
+//!
+//! The database filename was bumped to `-v1`, which lets us collapse
+//! the previous chain of incremental migrations (init, item media meta,
+//! item timestamps, item probed_at, playlist, library metadata) into a
+//! single create-from-scratch step. There is no upgrade path from the
+//! pre-v1 file — old DBs are simply ignored.
+//!
+//! `tag.name` and `playlist.name` need case-insensitive uniqueness, and
+//! `playlist` carries `CHECK` constraints on enum-like text columns;
+//! SeaORM's portable builder doesn't surface either, so those two
+//! tables are emitted as raw SQLite DDL.
+
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -48,6 +61,12 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Library::PluginId).big_integer().not_null())
                     .col(ColumnDef::new(Library::Path).text().not_null())
+                    .col(
+                        ColumnDef::new(Library::Metadata)
+                            .text()
+                            .not_null()
+                            .default("{}"),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_library_plugin")
@@ -105,6 +124,29 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Item::PreviewPath).text().null())
                     .col(ColumnDef::new(Item::Description).text().null())
                     .col(ColumnDef::new(Item::ExternalId).text().null())
+                    .col(ColumnDef::new(Item::Size).big_integer().null())
+                    .col(ColumnDef::new(Item::Width).integer().null())
+                    .col(ColumnDef::new(Item::Height).integer().null())
+                    .col(ColumnDef::new(Item::Format).text().null())
+                    .col(
+                        ColumnDef::new(Item::CreateAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0i64),
+                    )
+                    .col(
+                        ColumnDef::new(Item::UpdateAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0i64),
+                    )
+                    .col(
+                        ColumnDef::new(Item::SyncAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0i64),
+                    )
+                    .col(ColumnDef::new(Item::ProbedAt).big_integer().null())
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_item_plugin")
@@ -153,9 +195,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // `tag.name` needs case-insensitive uniqueness so "Anime" and
-        // "anime" collapse. SeaORM's ColumnDef has no collation knob
-        // across all backends, so we emit the SQLite DDL verbatim.
         manager
             .get_connection()
             .execute_unprepared(
@@ -206,15 +245,107 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "CREATE TABLE IF NOT EXISTS playlist (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,\
+                   name TEXT NOT NULL UNIQUE COLLATE NOCASE,\
+                   source_kind TEXT NOT NULL DEFAULT 'curated' \
+                     CHECK(source_kind IN ('curated','smart')),\
+                   filter_json TEXT NULL,\
+                   mode TEXT NOT NULL DEFAULT 'sequential' \
+                     CHECK(mode IN ('sequential','shuffle','random')),\
+                   interval_secs INTEGER NOT NULL DEFAULT 0,\
+                   shuffle_seed BIGINT NOT NULL DEFAULT 0,\
+                   create_at BIGINT NOT NULL,\
+                   update_at BIGINT NOT NULL\
+                 )",
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(PlaylistItem::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(PlaylistItem::PlaylistId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PlaylistItem::ItemId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PlaylistItem::Position)
+                            .integer()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(PlaylistItem::PlaylistId)
+                            .col(PlaylistItem::Position),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_playlist_item_playlist")
+                            .from(PlaylistItem::Table, PlaylistItem::PlaylistId)
+                            .to(Playlist::Table, Playlist::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_playlist_item_item")
+                            .from(PlaylistItem::Table, PlaylistItem::ItemId)
+                            .to(Item::Table, Item::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_playlist_item_unique")
+                    .table(PlaylistItem::Table)
+                    .col(PlaylistItem::PlaylistId)
+                    .col(PlaylistItem::ItemId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_playlist_item_item")
+                    .table(PlaylistItem::Table)
+                    .col(PlaylistItem::ItemId)
+                    .to_owned(),
+            )
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
+            .drop_table(Table::drop().table(PlaylistItem::Table).to_owned())
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared("DROP TABLE IF EXISTS playlist")
+            .await?;
+        manager
             .drop_table(Table::drop().table(ItemTag::Table).to_owned())
             .await?;
         manager
-            .drop_table(Table::drop().table(Tag::Table).to_owned())
+            .get_connection()
+            .execute_unprepared("DROP TABLE IF EXISTS tag")
             .await?;
         manager
             .drop_table(Table::drop().table(Item::Table).to_owned())
@@ -243,6 +374,7 @@ enum Library {
     Id,
     PluginId,
     Path,
+    Metadata,
 }
 
 #[derive(DeriveIden)]
@@ -257,6 +389,14 @@ enum Item {
     PreviewPath,
     Description,
     ExternalId,
+    Size,
+    Width,
+    Height,
+    Format,
+    CreateAt,
+    UpdateAt,
+    SyncAt,
+    ProbedAt,
 }
 
 #[derive(DeriveIden)]
@@ -270,4 +410,18 @@ enum ItemTag {
     Table,
     ItemId,
     TagId,
+}
+
+#[derive(DeriveIden)]
+enum Playlist {
+    Table,
+    Id,
+}
+
+#[derive(DeriveIden)]
+enum PlaylistItem {
+    Table,
+    PlaylistId,
+    ItemId,
+    Position,
 }

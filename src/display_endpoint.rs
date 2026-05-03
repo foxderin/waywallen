@@ -1,7 +1,7 @@
 //! Display endpoint — accepts external display client connections on a
 //! Unix socket and speaks the `waywallen-display-v1` protocol with them.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::anyhow;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
@@ -9,6 +9,13 @@ use std::sync::Arc;
 
 use crate::display_proto::generated::Rect;
 use crate::display_proto::{codec, error_code, opcode, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION};
+// Display-protocol failures are all daemon-internal (this layer talks
+// to consumer processes over a UDS, not to the WS/dbus surface). Every
+// anyhow! site in this file is wrapped as `Error::Internal(anyhow!(...))`
+// — the explicit constructor over a `.into()` shorthand because the
+// closure-result inference inside `.map_err(|e| ...)` can't pin the
+// target Error type (multiple `From<anyhow::Error>` impls are visible).
+use crate::error::{Error, Result, ResultExt};
 use crate::renderer_manager::{BindSnapshot, RendererHandle};
 use crate::routing::{DisplayHandle, DisplayOutEvent, DisplayRegistration, Router};
 use crate::scheduler::ProjectedConfig;
@@ -130,7 +137,7 @@ async fn handle_client(
     })
     .await
     .context("accepted join")?
-    .map_err(|e| anyhow!("send display_accepted: {e}"))?;
+    .map_err(|e| Error::Internal(anyhow!("send display_accepted: {e}")))?;
 
     let result = run_frame_loop(stream, router.clone(), display_id, rx, shutdown_rx).await;
     router.unregister_display(display_id).await;
@@ -155,7 +162,10 @@ async fn do_handshake(
         client_protocol_version,
     } = hello
     else {
-        return Err(anyhow!("expected hello, got opcode {}", hello.opcode()));
+        return Err(Error::Internal(anyhow!(
+            "expected hello, got opcode {}",
+            hello.opcode()
+        )));
     };
     if protocol != PROTOCOL_NAME {
         let s = stream.try_clone().context("clone for error")?;
@@ -174,7 +184,7 @@ async fn do_handshake(
             )
         })
         .await;
-        return Err(anyhow!("bad protocol string: {msg}"));
+        return Err(Error::Internal(anyhow!("bad protocol string: {msg}")));
     }
     if !(MIN_SUPPORTED_CLIENT_VERSION..=MAX_SUPPORTED_CLIENT_VERSION)
         .contains(&client_protocol_version)
@@ -196,7 +206,7 @@ async fn do_handshake(
             )
         })
         .await;
-        return Err(anyhow!("version mismatch: {msg}"));
+        return Err(Error::Internal(anyhow!("version mismatch: {msg}")));
     }
     log::info!(
         "display hello: {client_name} v{client_version} (proto v{client_protocol_version})"
@@ -215,7 +225,7 @@ async fn do_handshake(
     })
     .await
     .context("welcome join")?
-    .map_err(|e| anyhow!("send welcome: {e}"))?;
+    .map_err(|e| Error::Internal(anyhow!("send welcome: {e}")))?;
 
     let (reg, _fds): (Request, _) = recv_request_cancellable(stream, shutdown_rx)
         .await
@@ -231,10 +241,10 @@ async fn do_handshake(
         properties,
     } = reg
     else {
-        return Err(anyhow!(
+        return Err(Error::Internal(anyhow!(
             "expected register_display, got opcode {}",
             reg.opcode()
-        ));
+        )));
     };
     let instance_id = if instance_id.is_empty() { None } else { Some(instance_id) };
     log::info!(
@@ -424,13 +434,13 @@ async fn recv_request_cancellable(
     tokio::select! {
         biased;
         res = &mut handle => match res {
-            Ok(r) => r.map_err(|e| anyhow!("recv: {e}")),
-            Err(e) => Err(anyhow!("recv join: {e}")),
+            Ok(r) => r.map_err(|e| Error::Internal(anyhow!("recv: {e}"))),
+            Err(e) => Err(Error::Internal(anyhow!("recv join: {e}"))),
         },
         _ = wait_shutdown(shutdown_rx) => {
             let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
             let _ = handle.await;
-            Err(anyhow!("shutdown during recv"))
+            Err(Error::Internal(anyhow!("shutdown during recv")))
         }
     }
 }
@@ -456,7 +466,7 @@ async fn send_unbind(stream: &StdUnixStream, buffer_generation: u64) -> Result<(
     tokio::task::spawn_blocking(move || codec::send_event(&s, &evt, &[]))
         .await
         .context("unbind join")?
-        .map_err(|e| anyhow!("send unbind: {e}"))?;
+        .map_err(|e| Error::Internal(anyhow!("send unbind: {e}")))?;
     Ok(())
 }
 
@@ -485,7 +495,7 @@ async fn send_set_config(stream: &StdUnixStream, cfg: &ProjectedConfig) -> Resul
     tokio::task::spawn_blocking(move || codec::send_event(&s, &evt, &[]))
         .await
         .context("set_config join")?
-        .map_err(|e| anyhow!("send set_config: {e}"))?;
+        .map_err(|e| Error::Internal(anyhow!("send set_config: {e}")))?;
     Ok(())
 }
 
@@ -497,10 +507,10 @@ async fn send_bind_from_renderer(
     let (event, dup_fds) = {
         let guard = snapshot_arc
             .lock()
-            .map_err(|e| anyhow!("snapshot mutex poisoned: {e}"))?;
+            .map_err(|e| Error::Internal(anyhow!("snapshot mutex poisoned: {e}")))?;
         let snap = guard
             .as_ref()
-            .ok_or_else(|| anyhow!("renderer {} has no snapshot", renderer.id))?;
+            .ok_or_else(|| Error::Internal(anyhow!("renderer {} has no snapshot", renderer.id)))?;
         build_bind_event(snap)?
     };
     let s = stream.try_clone().context("clone for bind")?;
@@ -515,7 +525,7 @@ async fn send_bind_from_renderer(
     })
     .await
     .context("bind send join")?
-    .map_err(|e| anyhow!("send bind_buffers: {e}"))?;
+    .map_err(|e| Error::Internal(anyhow!("send bind_buffers: {e}")))?;
     Ok(())
 }
 
@@ -536,19 +546,19 @@ fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
         || snap.size.len() != n
         || snap.fds.len() != n
     {
-        return Err(anyhow!(
+        return Err(Error::Internal(anyhow!(
             "BindSnapshot parallel arrays inconsistent: count={} planes={} expected={} \
              stride={} offset={} size={} fds={}",
             count, planes_per_buffer, n,
             snap.stride.len(), snap.plane_offset.len(),
             snap.size.len(), snap.fds.len()
-        ));
+        )));
     }
 
     let mut dup_fds: Vec<RawFd> = Vec::with_capacity(n);
     for fd in &snap.fds {
         let raw = nix::unistd::dup(fd.as_raw_fd())
-            .map_err(|e| anyhow!("dup dma-buf fd: {e}"))?;
+            .map_err(|e| Error::Internal(anyhow!("dup dma-buf fd: {e}")))?;
         dup_fds.push(raw);
     }
 
@@ -588,7 +598,7 @@ fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
 fn acquire_sync_fd(renderer: &Arc<RendererHandle>, seq: u64) -> Result<OwnedFd> {
     renderer
         .clone_sync_fd(seq)
-        .ok_or_else(|| anyhow!("acquire sync_fd for seq={seq} missing (evicted or never arrived)"))
+        .ok_or_else(|| Error::Internal(anyhow!("acquire sync_fd for seq={seq} missing (evicted or never arrived)")))
 }
 
 async fn forward_frame_ready(
@@ -631,7 +641,7 @@ async fn forward_frame_ready(
     .context("frame_ready send join")?;
     drop(fence);
     drop(release_fd);
-    send_result.map_err(|e| anyhow!("send frame_ready: {e}"))?;
+    send_result.map_err(|e| Error::Internal(anyhow!("send frame_ready: {e}")))?;
 
     // Hand off to the renderer's reaper. If the channel is closed
     // (renderer evicted) the syncobj is destroyed by the dropped

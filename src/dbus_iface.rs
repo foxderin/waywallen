@@ -64,39 +64,39 @@ impl Daemon1 {
     async fn next(&self) -> zbus::fdo::Result<String> {
         control::step(&self.app, 1)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     async fn previous(&self) -> zbus::fdo::Result<String> {
         control::step(&self.app, -1)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     async fn pause(&self) -> zbus::fdo::Result<()> {
         control::pause_all(&self.app)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     async fn resume(&self) -> zbus::fdo::Result<()> {
         control::resume_all(&self.app)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     async fn rescan(&self) -> zbus::fdo::Result<u32> {
         control::rescan(&self.app)
             .await
             .map(|n| n as u32)
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     async fn apply_by_id(&self, id: String) -> zbus::fdo::Result<String> {
         control::apply_wallpaper_by_id(&self.app, &id, 0, 0)
             .await
             .map(|r| r.renderer_id)
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     /// Toggle shuffle on the active playlist. Persisted to settings so
@@ -115,14 +115,14 @@ impl Daemon1 {
     async fn activate_playlist(&self, id: i64) -> zbus::fdo::Result<()> {
         control::activate_playlist(&self.app, id)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     /// Switch back to the All pseudo-playlist.
     async fn deactivate_playlist(&self) -> zbus::fdo::Result<()> {
         control::deactivate_playlist(&self.app)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            .map_err(zbus::fdo::Error::from)
     }
 
     /// Snapshot of every persisted playlist. Tuple shape
@@ -130,7 +130,7 @@ impl Daemon1 {
     async fn list_playlists(&self) -> zbus::fdo::Result<Vec<(i64, String, String, String, u32, u32)>> {
         let rows = control::list_playlists(&self.app)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            .map_err(zbus::fdo::Error::from)?;
         Ok(rows
             .into_iter()
             .map(|s| {

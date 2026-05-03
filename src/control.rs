@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 
+use crate::error::{Error, Result};
 use crate::ipc::proto::ControlMsg;
 use crate::model::{repo, sync};
 use crate::playlist::rotator::RotationConfig;
@@ -62,7 +63,7 @@ pub async fn apply_wallpaper_by_id(
         },
     );
     rx.await
-        .map_err(|_| anyhow!("apply task superseded or cancelled"))?
+        .map_err(|_| Error::Internal(anyhow!("apply task superseded or cancelled")))?
 }
 
 /// The actual apply work — spawn renderer, relink displays, kill old
@@ -77,12 +78,14 @@ async fn apply_wallpaper_inner(
         let snap = app.source_snapshot.read().await;
         snap.get(id).cloned()
     };
-    let entry = entry.ok_or_else(|| anyhow!("wallpaper '{id}' not found"))?;
+    let entry = entry.ok_or_else(|| Error::WallpaperNotFound(id.to_string()))?;
 
-    let renderer_plugin_name = match app.renderer_manager.registry().resolve(&entry.wp_type) {
-        Some(def) => def.name.clone(),
-        None => return Err(anyhow!("no renderer for wallpaper type '{}'", entry.wp_type)),
-    };
+    let renderer_plugin_name = app
+        .renderer_manager
+        .registry()
+        .resolve(&entry.wp_type)
+        .map(|def| def.name.clone())
+        .ok_or_else(|| Error::NoRendererForType(entry.wp_type.clone()))?;
 
     // The D-Bus + rotator entry point always relinks every display
     // to the new renderer (relink_all_displays_to below). That means
@@ -97,24 +100,17 @@ async fn apply_wallpaper_inner(
     // `width`/`height` of `0` are legal — they tell the renderer to
     // derive that axis from the wallpaper's intrinsic size.
     // SPAWN_VERSION 3: source plugin's `extras(entry)` Lua callback
-    // returns the CLI argv dict. Plugins that haven't migrated fall
-    // back to entry.metadata inside `call_extras`.
-    let extras = match app
+    // returns the CLI argv dict. Lua failures used to fall back to
+    // `entry.metadata` silently; now they surface as
+    // `SourceExtrasFailed` so the dbus / rotator caller learns the
+    // real problem instead of getting a confusing "wrong settings"
+    // follow-up — same policy as the WS apply path.
+    let extras = app
         .source_manager
         .lock()
         .await
         .call_extras(&entry.plugin_name, &entry)
-        .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!(
-                "source_plugin '{}'.extras() failed: {e}; using entry.metadata fallback",
-                entry.plugin_name
-            );
-            entry.metadata.clone()
-        }
-    };
+        .await?;
     // Init.settings is the reconciled per-plugin section of the
     // settings store; defaults and bound-checks are already enforced
     // there (`Settings::reconcile` on startup, `coerce_and_validate`
@@ -132,7 +128,15 @@ async fn apply_wallpaper_inner(
         test_pattern: false,
         renderer_name: None,
     };
-    let renderer_id = app.renderer_manager.spawn(spawn_req).await?;
+    // renderer_manager still returns anyhow today (Phase 3 will give
+    // it typed Error). The blanket `From<anyhow::Error>` lands this in
+    // `Error::Internal`; once Phase 3 ships, the typed
+    // `RendererSpawnFailed` will flow through automatically.
+    let renderer_id = app
+        .renderer_manager
+        .spawn(spawn_req)
+        .await
+        .map_err(|e| Error::RendererSpawnFailed(e.to_string()))?;
     if let Some(handle) = app.renderer_manager.get(&renderer_id).await {
         app.router.register_renderer(handle).await;
     }
@@ -179,11 +183,11 @@ pub async fn step(app: &Arc<AppState>, delta: i32) -> Result<String> {
             playlist.refresh(snapshot);
         }
         if playlist.ids.is_empty() {
-            return Err(anyhow!("playlist is empty"));
+            return Err(Error::FailedPrecondition("playlist is empty".into()));
         }
         playlist
             .step(delta)
-            .ok_or_else(|| anyhow!("playlist is empty"))?
+            .ok_or_else(|| Error::FailedPrecondition("playlist is empty".into()))?
     };
     apply_wallpaper_by_id(app, &next_id, 0, 0).await?;
     // Reset the rotator deadline so the user gets the full quiet
@@ -654,7 +658,7 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
         Ok::<_, anyhow::Error>(sm.list().to_vec())
     })
     .await
-    .map_err(|e| anyhow!("source scan join: {e}"))??;
+    .map_err(|e| Error::Internal(anyhow!("source scan join: {e}")))??;
 
     let plugins = {
         let sm = app.source_manager.lock().await;
@@ -727,6 +731,7 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
             crate::probe_task::run_pending(&db, probe, crate::probe_task::PROBE_REFRESH_BATCH)
                 .await
                 .map(|_| ())
+                .map_err(anyhow::Error::from)
         },
     );
 

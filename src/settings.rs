@@ -216,17 +216,17 @@ pub fn default_config_path() -> PathBuf {
 
 /// Resolve the SQLite database location. Mirrors [`default_config_path`]
 /// but targets the XDG *data* dir instead of the config dir:
-///   1. `$XDG_DATA_HOME/waywallen/waywallen.db`
-///   2. `$HOME/.local/share/waywallen/waywallen.db`
-///   3. `./waywallen.db` (last-resort fallback)
+///   1. `$XDG_DATA_HOME/waywallen/waywallen-v1.db`
+///   2. `$HOME/.local/share/waywallen/waywallen-v1.db`
+///   3. `./waywallen-v1.db` (last-resort fallback)
 pub fn default_db_path() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(xdg).join("waywallen/waywallen.db");
+        return PathBuf::from(xdg).join("waywallen/waywallen-v1.db");
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".local/share/waywallen/waywallen.db");
+        return PathBuf::from(home).join(".local/share/waywallen/waywallen-v1.db");
     }
-    PathBuf::from("waywallen.db")
+    PathBuf::from("waywallen-v1.db")
 }
 
 pub struct SettingsStore {

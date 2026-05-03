@@ -26,10 +26,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use sea_orm::DatabaseConnection;
 use tokio::sync::watch;
 
+use crate::error::{Result, ResultExt};
 use crate::media_probe::MediaProbe;
 use crate::model::repo;
 use crate::tasks::now_ms;
@@ -124,7 +124,7 @@ pub async fn run_pending(
             probe_for_blocking.probe(&abs_for_blocking)
         })
         .await
-        .map_err(|e| anyhow::anyhow!("probe join id={}: {e}", item.id))?;
+        .with_context(|| format!("probe join id={}", item.id))?;
 
         if meta.width.is_some() || meta.height.is_some() {
             stats.gained_dimensions += 1;

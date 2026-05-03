@@ -530,7 +530,11 @@ async fn async_main() -> anyhow::Result<()> {
                 coord_state.tasks.spawn_async(
                     tasks::TaskKind::Startup,
                     "startup/restore",
-                    async move { control::run_restore(&restore_state, restore_last).await },
+                    async move {
+                        control::run_restore(&restore_state, restore_last)
+                            .await
+                            .map_err(anyhow::Error::from)
+                    },
                 );
                 Ok(())
             },
@@ -549,7 +553,9 @@ async fn async_main() -> anyhow::Result<()> {
             tasks::TaskKind::Service,
             "probe/scheduler",
             async move {
-                probe_task::scheduler_loop(db_for_task, probe_for_task, shutdown_for_task).await
+                probe_task::scheduler_loop(db_for_task, probe_for_task, shutdown_for_task)
+                    .await
+                    .map_err(anyhow::Error::from)
             },
         );
     }

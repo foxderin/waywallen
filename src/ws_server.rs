@@ -558,11 +558,10 @@ async fn dispatch_inner(
                 test_pattern: false,
                 renderer_name: None,
             };
-            let id = state
-                .renderer_manager
-                .spawn(spawn_req)
-                .await
-                .map_err(|e| Error::RendererSpawnFailed(e.to_string()))?;
+            // renderer_manager returns the typed Error directly (spawn
+            // produces RendererSpawnFailed/NoRendererForType/RendererNotFound
+            // depending on the failure); just propagate.
+            let id = state.renderer_manager.spawn(spawn_req).await?;
             if let Some(handle) = state.renderer_manager.get(&id).await {
                 state.router.register_renderer(handle).await;
             }
@@ -604,8 +603,7 @@ async fn dispatch_inner(
             state
                 .renderer_manager
                 .send_control(&r.renderer_id, ControlMsg::Play)
-                .await
-                .map_err(|e| Error::RendererControlFailed(e.to_string()))?;
+                .await?;
             Res::RendererPlay(pb::Empty {})
         }
 
@@ -613,8 +611,7 @@ async fn dispatch_inner(
             state
                 .renderer_manager
                 .send_control(&r.renderer_id, ControlMsg::Pause)
-                .await
-                .map_err(|e| Error::RendererControlFailed(e.to_string()))?;
+                .await?;
             Res::RendererPause(pb::Empty {})
         }
 
@@ -622,8 +619,7 @@ async fn dispatch_inner(
             state
                 .renderer_manager
                 .send_control(&r.renderer_id, ControlMsg::Mouse { x: r.x, y: r.y })
-                .await
-                .map_err(|e| Error::RendererControlFailed(e.to_string()))?;
+                .await?;
             Res::RendererMouse(pb::Empty {})
         }
 
@@ -631,18 +627,13 @@ async fn dispatch_inner(
             state
                 .renderer_manager
                 .send_control(&r.renderer_id, ControlMsg::SetFps { fps: r.fps })
-                .await
-                .map_err(|e| Error::RendererControlFailed(e.to_string()))?;
+                .await?;
             Res::RendererFps(pb::Empty {})
         }
 
         Req::RendererKill(r) => {
             state.router.unregister_renderer(&r.renderer_id).await;
-            state
-                .renderer_manager
-                .kill(&r.renderer_id)
-                .await
-                .map_err(|e| Error::RendererNotFound(e.to_string()))?;
+            state.renderer_manager.kill(&r.renderer_id).await?;
             Res::RendererKill(pb::Empty {})
         }
 
@@ -753,7 +744,12 @@ async fn dispatch_inner(
                 tasks::TaskKind::Generic,
                 "scan/refresh",
                 "scan/refresh",
-                async move { control::refresh_sources(&scan_state).await.map(|_| ()) },
+                async move {
+                    control::refresh_sources(&scan_state)
+                        .await
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
+                },
             );
             Res::WallpaperScan(pb::WallpaperScanResponse { count: 0 })
         }
@@ -887,11 +883,7 @@ async fn dispatch_inner(
                 .lock()
                 .await
                 .call_extras(&entry.plugin_name, &entry)
-                .await
-                .map_err(|e| Error::SourceExtrasFailed {
-                    plugin: entry.plugin_name.clone(),
-                    message: e.to_string(),
-                })?;
+                .await?;
 
             let spawn_req = renderer_manager::SpawnRequest {
                 wp_type: entry.wp_type.clone(),
@@ -946,11 +938,7 @@ async fn dispatch_inner(
                         );
                         state.router.stop_renderers(&to_stop).await;
                     }
-                    let new_id = state
-                        .renderer_manager
-                        .spawn(spawn_req)
-                        .await
-                        .map_err(|e| Error::RendererSpawnFailed(e.to_string()))?;
+                    let new_id = state.renderer_manager.spawn(spawn_req).await?;
                     if let Some(handle) = state.renderer_manager.get(&new_id).await {
                         state.router.register_renderer(handle).await;
                     }
@@ -1221,7 +1209,10 @@ async fn dispatch_inner(
                 "scan/refresh",
                 "scan/refresh-after-library-add",
                 async move {
-                    control::refresh_sources(&rescan_state).await.map(|_| ())
+                    control::refresh_sources(&rescan_state)
+                        .await
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
                 },
             );
             Res::LibraryAdd(pb::Empty {})
@@ -1243,7 +1234,10 @@ async fn dispatch_inner(
                 "scan/refresh",
                 "scan/refresh-after-library-remove",
                 async move {
-                    control::refresh_sources(&rescan_state).await.map(|_| ())
+                    control::refresh_sources(&rescan_state)
+                        .await
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
                 },
             );
             Res::LibraryRemove(pb::Empty {})
@@ -1277,9 +1271,9 @@ async fn dispatch_inner(
                 interval_secs: r.interval_secs as i32,
                 shuffle_seed: 0,
             };
-            let p = repo::create_playlist(&state.db, args)
-                .await
-                .map_err(|e| Error::PlaylistInvalid(e.to_string()))?;
+            // repo::create_playlist returns Error::PlaylistInvalid on
+            // smart/curated invariant violation; let it propagate.
+            let p = repo::create_playlist(&state.db, args).await?;
             if !r.item_ids.is_empty() {
                 if let Err(e) = repo::set_playlist_items(&state.db, p.id, &r.item_ids).await {
                     // Best-effort cleanup so we don't leave an empty
@@ -1345,9 +1339,10 @@ async fn dispatch_inner(
         }
 
         Req::PlaylistActivate(r) => {
-            control::activate_playlist(&state, r.id)
-                .await
-                .map_err(|e| Error::PlaylistNotFound(e.to_string()))?;
+            // playlist::resolve::activate now returns Error::PlaylistNotFound
+            // directly; the typed code flows through control::activate_playlist
+            // and out here without an adapter.
+            control::activate_playlist(&state, r.id).await?;
             // Adopt the row's stored interval into the live rotator so
             // a rotating playlist starts ticking on activate without a
             // separate set_interval round-trip. The lookup may legitimately

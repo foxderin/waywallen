@@ -58,6 +58,28 @@ pub enum Error {
     #[error("decode: {0}")]
     Decode(#[from] prost::DecodeError),
 
+    /// JSON encode/decode failure (used by `repo` for the
+    /// `library.metadata` TEXT column and similar). Surfaces as
+    /// `ErrorCode::Internal` — clients shouldn't have to distinguish
+    /// "the daemon failed to serialize state" from other internal bugs.
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// `tokio::task::JoinError` — a `spawn_blocking` / `spawn` future
+    /// panicked or was cancelled. Always indicates a daemon-internal
+    /// fault; surfaces as `ErrorCode::Internal`.
+    #[error("task join: {0}")]
+    Join(#[from] tokio::task::JoinError),
+
+    /// `mlua::Error` — Lua VM error from a source-plugin callback,
+    /// registry value mismatch, table key lookup, etc. Surfaces as
+    /// `ErrorCode::Internal`. Plugin call sites that *know* the
+    /// failure is a user-facing extras/scan callback should wrap with
+    /// `Error::SourceExtrasFailed { plugin, message }` instead so the
+    /// wire code carries the right meaning.
+    #[error("lua: {0}")]
+    Lua(#[from] mlua::Error),
+
     /// Inbound `Request.payload` was `None` — caller sent an envelope
     /// with no oneof variant set.
     #[error("{0}")]
@@ -137,6 +159,20 @@ pub enum Error {
     /// (constraint violation, bad name, …).
     #[error("playlist invalid: {0}")]
     PlaylistInvalid(String),
+
+    /// Diagnostic wrapper: attaches a context message to an existing
+    /// error without downgrading its type. `error_code()` recurses to
+    /// the inner variant so wire-side typing is preserved.
+    ///
+    /// Display mirrors anyhow's chain: `outer_ctx: inner_ctx: TypedErr`.
+    /// Build via `Error::context(self, ctx)` or, on a `Result`, via the
+    /// `ResultExt::context` / `with_context` extension methods.
+    #[error("{context}: {source}")]
+    WithContext {
+        context: String,
+        #[source]
+        source: Box<Error>,
+    },
 }
 
 /// Daemon-wide `Result` alias. Callers explicitly import as
@@ -150,13 +186,32 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
+    /// Attach a diagnostic context message. The original variant's
+    /// `error_code()` is preserved — the wrapper is purely a
+    /// human-readable annotation.
+    ///
+    /// Mirrors `anyhow::Error::context`: outermost context appears
+    /// first when the chain renders.
+    pub fn context(self, ctx: impl std::fmt::Display) -> Self {
+        Self::WithContext {
+            context: ctx.to_string(),
+            source: Box::new(self),
+        }
+    }
+
     /// Map this error onto its wire-level `pb::ErrorCode`. Always
     /// returns a non-`Ok` code — `Ok` is reserved for the success
-    /// path (`ok_response`).
+    /// path (`ok_response`). `WithContext` recurses so a context
+    /// wrapper never downgrades a typed variant to `Internal`.
     pub fn error_code(&self) -> pb::ErrorCode {
         use pb::ErrorCode as E;
         match self {
-            Self::Internal(_) | Self::Io(_) => E::Internal,
+            Self::WithContext { source, .. } => source.error_code(),
+            Self::Internal(_)
+            | Self::Io(_)
+            | Self::Json(_)
+            | Self::Join(_)
+            | Self::Lua(_) => E::Internal,
             Self::Db(_) => E::Db,
             Self::Decode(_) => E::Decode,
             Self::UnexpectedPayload(_) => E::UnexpectedPayload,
@@ -222,6 +277,40 @@ impl Error {
     }
 }
 
+/// Map onto the zbus error vocabulary so the D-Bus surface
+/// (`Daemon1`) carries some structure beyond the generic `Failed`.
+/// Variants without a clean zbus analogue (`FailedPrecondition`,
+/// `NoDisplayRegistered`, internal-class) collapse to `Failed`.
+///
+/// `WithContext` recurses via `error_code()`-style logic — we pattern
+/// on the inner variant so a context wrapper doesn't downgrade
+/// everything to `Failed`.
+impl From<Error> for zbus::fdo::Error {
+    fn from(e: Error) -> Self {
+        let msg = e.to_string();
+        let code = e.error_code();
+        use pb::ErrorCode as E;
+        match code {
+            E::WallpaperNotFound
+            | E::RendererNotFound
+            | E::SourcePluginNotFound
+            | E::LibraryNotFound
+            | E::PlaylistNotFound => zbus::fdo::Error::FileNotFound(msg),
+            E::InvalidArgument
+            | E::UnexpectedPayload
+            | E::Decode
+            | E::RendererTypeMismatch
+            | E::NoRendererForType
+            | E::SettingsValidationFailed
+            | E::PlaylistInvalid => zbus::fdo::Error::InvalidArgs(msg),
+            // FailedPrecondition / NoDisplayRegistered / Internal-class
+            // / Db / Spawn / Control / Extras / SettingsApply — no
+            // dedicated zbus variant, fall through.
+            _ => zbus::fdo::Error::Failed(msg),
+        }
+    }
+}
+
 /// Build a wire `Response` for a successful dispatch. Pins
 /// `error_code = OK` and `status = OK`.
 pub fn ok_response(request_id: u64, payload: pb::response::Payload) -> pb::Response {
@@ -231,5 +320,39 @@ pub fn ok_response(request_id: u64, payload: pb::response::Payload) -> pb::Respo
         error_code: pb::ErrorCode::Ok as i32,
         message: String::new(),
         payload: Some(payload),
+    }
+}
+
+/// Extension trait for `Result<T, E>` where `E: Into<Error>`. Mirrors
+/// `anyhow::Context` so callers migrating from `.with_context(...)?`
+/// keep an idiomatic spelling — `result.context("loading row")?` —
+/// while landing on the daemon-wide typed `Error` via the wrapper.
+pub trait ResultExt<T> {
+    /// Attach a static context. Always evaluates the context; prefer
+    /// `with_context` when the context is expensive to build.
+    fn context<C: std::fmt::Display>(self, ctx: C) -> Result<T, Error>;
+
+    /// Attach a context computed lazily — only invoked on the error
+    /// path. Mirrors `anyhow::Context::with_context`.
+    fn with_context<C, F>(self, f: F) -> Result<T, Error>
+    where
+        C: std::fmt::Display,
+        F: FnOnce() -> C;
+}
+
+impl<T, E> ResultExt<T> for std::result::Result<T, E>
+where
+    E: Into<Error>,
+{
+    fn context<C: std::fmt::Display>(self, ctx: C) -> Result<T, Error> {
+        self.map_err(|e| e.into().context(ctx))
+    }
+
+    fn with_context<C, F>(self, f: F) -> Result<T, Error>
+    where
+        C: std::fmt::Display,
+        F: FnOnce() -> C,
+    {
+        self.map_err(|e| e.into().context(f()))
     }
 }

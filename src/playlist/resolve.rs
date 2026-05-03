@@ -19,11 +19,11 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
 use sea_orm::{DatabaseConnection, EntityTrait};
 
 use super::filter::Filter;
 use super::state::{Mode, PlaylistState};
+use crate::error::{Error, Result, ResultExt};
 use crate::model::entities::{item, library, playlist};
 use crate::model::repo;
 use crate::model::sync::relative_under_root;
@@ -136,13 +136,12 @@ pub async fn activate(
         .one(db)
         .await
         .with_context(|| format!("select playlist id={id}"))?
-        .ok_or_else(|| anyhow!("playlist id={id} not found"))?;
+        .ok_or_else(|| Error::PlaylistNotFound(format!("id={id}")))?;
 
     let filter = if row.source_kind == repo::PLAYLIST_KIND_SMART {
-        let blob = row
-            .filter_json
-            .as_deref()
-            .ok_or_else(|| anyhow!("smart playlist id={id} missing filter_json"))?;
+        let blob = row.filter_json.as_deref().ok_or_else(|| {
+            Error::PlaylistInvalid(format!("smart playlist id={id} missing filter_json"))
+        })?;
         Some(
             Filter::from_json(blob)
                 .with_context(|| format!("decode filter_json id={id}"))?,

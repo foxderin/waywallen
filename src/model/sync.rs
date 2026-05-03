@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use crate::error::{Result, ResultExt};
 use sea_orm::DatabaseConnection;
 
 use super::repo::{self, ItemUpsertArgs};

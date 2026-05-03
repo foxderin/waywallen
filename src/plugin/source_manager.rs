@@ -1,4 +1,6 @@
-use anyhow::Result;
+use anyhow::anyhow;
+
+use crate::error::{Error, Result};
 use mlua::prelude::*;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
@@ -77,24 +79,26 @@ impl SourceManager {
     /// Load a single `.lua` source plugin. Returns the plugin name.
     pub fn load_plugin(&mut self, path: &Path) -> Result<String> {
         let source = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+            .map_err(|e| Error::Internal(anyhow!("read {}: {e}", path.display())))?;
         let module: LuaTable = self
             .lua
             .load(&source)
             .set_name(path.to_string_lossy())
             .eval()
-            .map_err(|e| anyhow::anyhow!("eval {}: {e}", path.display()))?;
+            .map_err(|e| Error::Internal(anyhow!("eval {}: {e}", path.display())))?;
 
-        // Call info() to get plugin metadata.
+        // Call info() to get plugin metadata. All three steps are
+        // load-time daemon-internal failures; collapse to Internal with
+        // descriptive context.
         let info_fn: LuaFunction = module
             .get("info")
-            .map_err(|e| anyhow::anyhow!("plugin must export info(): {e}"))?;
+            .map_err(|e| Error::Internal(anyhow!("plugin must export info(): {e}")))?;
         let info_table: LuaTable = info_fn
             .call(())
-            .map_err(|e| anyhow::anyhow!("info() failed: {e}"))?;
+            .map_err(|e| Error::Internal(anyhow!("info() failed: {e}")))?;
         let name: String = info_table
             .get("name")
-            .map_err(|e| anyhow::anyhow!("info().name required: {e}"))?;
+            .map_err(|e| Error::Internal(anyhow!("info().name required: {e}")))?;
 
         let key = self.lua.create_registry_value(module)?;
         self.plugins.insert(name.clone(), key);
@@ -107,9 +111,9 @@ impl SourceManager {
         let pattern = dir.join("*.lua");
         let pattern_str = pattern
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("source dir path not valid UTF-8"))?;
+            .ok_or_else(|| Error::Internal(anyhow!("source dir path not valid UTF-8")))?;
         let mut names = Vec::new();
-        for entry in glob::glob(pattern_str).map_err(|e| anyhow::anyhow!("glob: {e}"))? {
+        for entry in glob::glob(pattern_str).map_err(|e| Error::Internal(anyhow!("glob: {e}")))? {
             match entry {
                 Ok(path) => match self.load_plugin(&path) {
                     Ok(name) => names.push(name),
@@ -158,11 +162,11 @@ impl SourceManager {
         let key = self
             .plugins
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown plugin"))?;
+            .ok_or_else(|| Error::SourcePluginNotFound(name.to_string()))?;
         let module: LuaTable = self.lua.registry_value(key)?;
         let scan_fn: LuaFunction = module
             .get("scan")
-            .map_err(|e| anyhow::anyhow!("plugin must export scan(ctx): {e}"))?;
+            .map_err(|e| Error::Internal(anyhow!("plugin must export scan(ctx): {e}")))?;
 
         let ctx = self.build_ctx(Some(name), libraries)?;
         let results: LuaTable = scan_fn.call_async(ctx).await?;
@@ -384,7 +388,7 @@ impl SourceManager {
                         let (Some(db), Some(plugin_name)) = (db, plugin_name) else {
                             return Ok(mlua::Value::Nil);
                         };
-                        let res: anyhow::Result<Option<String>> = async {
+                        let res: crate::error::Result<Option<String>> = async {
                             let Some(plugin) =
                                 repo::find_plugin_by_name(&db, &plugin_name).await?
                             else {
@@ -421,7 +425,7 @@ impl SourceManager {
                         let (Some(db), Some(plugin_name)) = (db, plugin_name) else {
                             return Ok(false);
                         };
-                        let res: anyhow::Result<bool> = async {
+                        let res: crate::error::Result<bool> = async {
                             let Some(plugin) =
                                 repo::find_plugin_by_name(&db, &plugin_name).await?
                             else {
@@ -508,58 +512,70 @@ impl SourceManager {
         let key = self
             .plugins
             .get(plugin_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown source plugin: {plugin_name}"))?;
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let extras_fn: Option<LuaFunction> = module.get("extras").ok();
-        let Some(extras_fn) = extras_fn else {
-            // Legacy path: plugin hasn't migrated to extras(entry, ctx)
-            // yet. Fall back to entry.metadata.
-            log::debug!(
-                "source plugin '{plugin_name}' has no extras() function; \
-                 using legacy entry.metadata as CLI extras"
-            );
-            return Ok(entry.metadata.clone());
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        // Body runs in a sub-block so any mlua failure rolls up into a
+        // single typed `SourceExtrasFailed` carrying the plugin name —
+        // callers (ws_server, control) just need the typed surface and
+        // the underlying Lua trace as a string.
+        let body = async {
+            let module: LuaTable = self.lua.registry_value(key)?;
+            let extras_fn: Option<LuaFunction> = module.get("extras").ok();
+            let Some(extras_fn) = extras_fn else {
+                // Legacy path: plugin hasn't migrated to extras(entry, ctx)
+                // yet. Fall back to entry.metadata.
+                log::debug!(
+                    "source plugin '{plugin_name}' has no extras() function; \
+                     using legacy entry.metadata as CLI extras"
+                );
+                return Ok::<_, mlua::Error>(entry.metadata.clone());
+            };
+            let entry_tbl = self.lua.create_table()?;
+            entry_tbl.set("id", entry.id.clone())?;
+            entry_tbl.set("name", entry.name.clone())?;
+            entry_tbl.set("wp_type", entry.wp_type.clone())?;
+            entry_tbl.set("resource", entry.resource.clone())?;
+            if let Some(p) = &entry.preview {
+                entry_tbl.set("preview", p.clone())?;
+            }
+            // Forward the (still-existing) metadata table so plugins that
+            // wrote secondary keys at scan-time can read them back here.
+            let md_tbl = self.lua.create_table()?;
+            for (k, v) in &entry.metadata {
+                md_tbl.set(k.clone(), v.clone())?;
+            }
+            entry_tbl.set("metadata", md_tbl)?;
+            if let Some(d) = &entry.description {
+                entry_tbl.set("description", d.clone())?;
+            }
+            // `library_root` and `external_id` are the two "where did this
+            // come from" anchors plugins need at extras-time: the former
+            // to look up library-scoped metadata, the latter as a
+            // first-class id (e.g. wallpaper_engine workshop_id) without
+            // re-parsing the resource path.
+            if !entry.library_root.is_empty() {
+                entry_tbl.set("library_root", entry.library_root.clone())?;
+            }
+            if let Some(eid) = &entry.external_id {
+                entry_tbl.set("external_id", eid.clone())?;
+            }
+            // Build the same ctx scan(ctx) sees, so extras can call
+            // `library_meta_get` etc. Empty libraries list — extras runs
+            // per-entry, not per-library, and shouldn't need to enumerate.
+            let ctx = self
+                .build_ctx(Some(plugin_name), &[])
+                .map_err(mlua::Error::external)?;
+            let result: LuaTable = extras_fn.call_async((entry_tbl, ctx)).await?;
+            let mut out = HashMap::new();
+            for pair in result.pairs::<String, String>() {
+                let (k, v) = pair?;
+                out.insert(k, v);
+            }
+            Ok(out)
         };
-        let entry_tbl = self.lua.create_table()?;
-        entry_tbl.set("id", entry.id.clone())?;
-        entry_tbl.set("name", entry.name.clone())?;
-        entry_tbl.set("wp_type", entry.wp_type.clone())?;
-        entry_tbl.set("resource", entry.resource.clone())?;
-        if let Some(p) = &entry.preview {
-            entry_tbl.set("preview", p.clone())?;
-        }
-        // Forward the (still-existing) metadata table so plugins that
-        // wrote secondary keys at scan-time can read them back here.
-        let md_tbl = self.lua.create_table()?;
-        for (k, v) in &entry.metadata {
-            md_tbl.set(k.clone(), v.clone())?;
-        }
-        entry_tbl.set("metadata", md_tbl)?;
-        if let Some(d) = &entry.description {
-            entry_tbl.set("description", d.clone())?;
-        }
-        // `library_root` and `external_id` are the two "where did this
-        // come from" anchors plugins need at extras-time: the former
-        // to look up library-scoped metadata, the latter as a
-        // first-class id (e.g. wallpaper_engine workshop_id) without
-        // re-parsing the resource path.
-        if !entry.library_root.is_empty() {
-            entry_tbl.set("library_root", entry.library_root.clone())?;
-        }
-        if let Some(eid) = &entry.external_id {
-            entry_tbl.set("external_id", eid.clone())?;
-        }
-        // Build the same ctx scan(ctx) sees, so extras can call
-        // `library_meta_get` etc. Empty libraries list — extras runs
-        // per-entry, not per-library, and shouldn't need to enumerate.
-        let ctx = self.build_ctx(Some(plugin_name), &[])?;
-        let result: LuaTable = extras_fn.call_async((entry_tbl, ctx)).await?;
-        let mut out = HashMap::new();
-        for pair in result.pairs::<String, String>() {
-            let (k, v) = pair?;
-            out.insert(k, v);
-        }
-        Ok(out)
+        body.await.map_err(|e: mlua::Error| Error::SourceExtrasFailed {
+            plugin: plugin_name.to_string(),
+            message: e.to_string(),
+        })
     }
 
     /// Ask every plugin that exports `auto_detect(ctx)` to probe

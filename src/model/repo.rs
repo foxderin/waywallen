@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result};
+use anyhow::anyhow;
+
+use crate::error::{Error, Result, ResultExt};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
@@ -160,7 +162,7 @@ pub async fn get_library_metadata(
         .one(db)
         .await
         .with_context(|| format!("select library id={library_id} for metadata"))?
-        .ok_or_else(|| anyhow::anyhow!("library id={library_id} not found"))?;
+        .ok_or(Error::LibraryNotFound(library_id))?;
     Ok(decode_library_metadata(&row.metadata))
 }
 
@@ -184,7 +186,7 @@ pub async fn set_library_metadata_value(
         .one(db)
         .await
         .with_context(|| format!("reload library id={library_id} for metadata write"))?
-        .ok_or_else(|| anyhow::anyhow!("library id={library_id} not found"))?;
+        .ok_or(Error::LibraryNotFound(library_id))?;
     let mut map = decode_library_metadata(&existing.metadata);
     match value {
         Some(v) => {
@@ -213,7 +215,7 @@ pub async fn replace_library_metadata(
         .one(db)
         .await
         .with_context(|| format!("reload library id={library_id} for metadata write"))?
-        .ok_or_else(|| anyhow::anyhow!("library id={library_id} not found"))?;
+        .ok_or(Error::LibraryNotFound(library_id))?;
     let encoded = serde_json::to_string(kv).context("encode library metadata")?;
     let mut am: library::ActiveModel = existing.into();
     am.metadata = Set(encoded);
@@ -333,7 +335,7 @@ pub async fn upsert_item(
         .one(db)
         .await
         .with_context(|| format!("reload item lib={} path={}", args.library_id, args.path))?
-        .ok_or_else(|| anyhow::anyhow!("reloaded item missing after upsert"))
+        .ok_or_else(|| Error::Internal(anyhow!("reloaded item missing after upsert")))
 }
 
 pub async fn list_items_by_library(
@@ -450,7 +452,7 @@ pub async fn update_item_media(
         .one(db)
         .await
         .with_context(|| format!("reload item id={id}"))?
-        .ok_or_else(|| anyhow::anyhow!("item id={id} disappeared before probe write"))?;
+        .ok_or_else(|| Error::Internal(anyhow!("item id={id} disappeared before probe write")))?;
 
     let new_size = meta.size.or(existing.size);
     let new_width = meta
@@ -656,10 +658,14 @@ pub async fn create_playlist(
     args: PlaylistCreateArgs<'_>,
 ) -> Result<playlist::Model> {
     if args.source_kind == PLAYLIST_KIND_SMART && args.filter_json.is_none() {
-        anyhow::bail!("smart playlist requires filter_json");
+        return Err(Error::PlaylistInvalid(
+            "smart playlist requires filter_json".into(),
+        ));
     }
     if args.source_kind == PLAYLIST_KIND_CURATED && args.filter_json.is_some() {
-        anyhow::bail!("curated playlist must have filter_json = None");
+        return Err(Error::PlaylistInvalid(
+            "curated playlist must have filter_json = None".into(),
+        ));
     }
     let now = now_ms();
     let am = playlist::ActiveModel {
@@ -707,7 +713,7 @@ pub async fn find_playlist(
 pub async fn rename_playlist(db: &DatabaseConnection, id: i64, name: &str) -> Result<()> {
     let existing = find_playlist(db, id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("playlist id={id} not found"))?;
+        .ok_or_else(|| Error::PlaylistNotFound(format!("id={id}")))?;
     let now = now_ms();
     let mut am: playlist::ActiveModel = existing.into();
     am.name = Set(name.to_owned());
@@ -725,7 +731,7 @@ pub async fn set_playlist_mode(
 ) -> Result<()> {
     let existing = find_playlist(db, id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("playlist id={id} not found"))?;
+        .ok_or_else(|| Error::PlaylistNotFound(format!("id={id}")))?;
     let now = now_ms();
     let mut am: playlist::ActiveModel = existing.into();
     am.mode = Set(mode.to_owned());
@@ -743,7 +749,7 @@ pub async fn set_playlist_interval(
 ) -> Result<()> {
     let existing = find_playlist(db, id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("playlist id={id} not found"))?;
+        .ok_or_else(|| Error::PlaylistNotFound(format!("id={id}")))?;
     let now = now_ms();
     let mut am: playlist::ActiveModel = existing.into();
     am.interval_secs = Set(interval_secs);
@@ -764,9 +770,11 @@ pub async fn set_playlist_filter(
 ) -> Result<()> {
     let existing = find_playlist(db, id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("playlist id={id} not found"))?;
+        .ok_or_else(|| Error::PlaylistNotFound(format!("id={id}")))?;
     if existing.source_kind != PLAYLIST_KIND_SMART {
-        anyhow::bail!("playlist id={id} is not smart");
+        return Err(Error::PlaylistInvalid(format!(
+            "playlist id={id} is not smart"
+        )));
     }
     let now = now_ms();
     let mut am: playlist::ActiveModel = existing.into();
@@ -785,7 +793,7 @@ pub async fn set_playlist_shuffle_seed(
 ) -> Result<()> {
     let existing = find_playlist(db, id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("playlist id={id} not found"))?;
+        .ok_or_else(|| Error::PlaylistNotFound(format!("id={id}")))?;
     let mut am: playlist::ActiveModel = existing.into();
     am.shuffle_seed = Set(seed);
     am.update_at = Set(now_ms());
@@ -805,9 +813,11 @@ pub async fn set_playlist_items(
 ) -> Result<()> {
     let existing = find_playlist(db, id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("playlist id={id} not found"))?;
+        .ok_or_else(|| Error::PlaylistNotFound(format!("id={id}")))?;
     if existing.source_kind != PLAYLIST_KIND_CURATED {
-        anyhow::bail!("playlist id={id} is not curated");
+        return Err(Error::PlaylistInvalid(format!(
+            "playlist id={id} is not curated"
+        )));
     }
     // Dedup while preserving first-seen order — the unique
     // (playlist_id, item_id) index would reject dupes anyway and we
