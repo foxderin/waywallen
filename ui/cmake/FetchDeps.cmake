@@ -164,7 +164,7 @@ macro(_fetchdeps_fetch_one _fd_entry _fd_source_root)
       string(JSON _fd_xc GET "${_fd_entry}" "x-cmake")
 
       _fetchdeps_json_get_opt(_fd_v "${_fd_xc}" exclude_from_all)
-      if(_fd_v STREQUAL "true")
+      if(_fd_v)
         set(_fd_exclude_from_all TRUE)
         list(APPEND _fd_declare_args EXCLUDE_FROM_ALL)
       endif()
