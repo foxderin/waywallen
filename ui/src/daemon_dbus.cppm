@@ -37,7 +37,7 @@ public:
 
     Q_PROPERTY(Status   status         READ status         NOTIFY statusChanged FINAL)
     Q_PROPERTY(quint16  wsPort         READ wsPort         NOTIFY wsPortChanged FINAL)
-    Q_PROPERTY(quint32  daemonVersion  READ daemonVersion  NOTIFY statusChanged FINAL)
+    Q_PROPERTY(QString  daemonVersion  READ daemonVersion  NOTIFY statusChanged FINAL)
     /// Convenience derived from `status == Connected`.
     Q_PROPERTY(bool     daemonAvailable READ daemonAvailable NOTIFY statusChanged FINAL)
 
@@ -47,10 +47,10 @@ public:
     static DaemonDBusClient* create(QQmlEngine*, QJSEngine*);
     static DaemonDBusClient* instance();
 
-    Status   status() const          { return m_status; }
-    quint16  wsPort() const          { return m_ws_port; }
-    quint32  daemonVersion() const   { return m_daemon_version; }
-    bool     daemonAvailable() const { return m_status == Connected; }
+    Status        status() const          { return m_status; }
+    quint16       wsPort() const          { return m_ws_port; }
+    const QString& daemonVersion() const  { return m_daemon_version; }
+    bool          daemonAvailable() const { return m_status == Connected; }
 
     /// Synchronous round-trip: read WsPort, then probe Version. Updates
     /// `status` to one of {Disconnected, VersionMissing, VersionMismatch,
@@ -90,7 +90,7 @@ private:
     QDBusConnection      m_bus;
     QDBusServiceWatcher* m_watcher { nullptr };
     quint16              m_ws_port { 0 };
-    quint32              m_daemon_version { 0 };
+    QString              m_daemon_version;
     Status               m_status { Disconnected };
 };
 

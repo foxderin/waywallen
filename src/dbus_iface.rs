@@ -21,6 +21,14 @@ pub struct Daemon1 {
 
 #[interface(name = "org.waywallen.waywallen.Daemon1")]
 impl Daemon1 {
+    /// Crate version (Cargo.toml). UI compares this against its own
+    /// build-time `APP_VERSION` to gate the connection — mismatched
+    /// builds stay disconnected and surface a dialog.
+    #[zbus(property)]
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     #[zbus(property)]
     fn display_socket_path(&self) -> &str {
         &self.display_socket_path

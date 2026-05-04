@@ -4,6 +4,7 @@ module;
 #include <csignal>
 #include <sys/types.h>
 
+#include <QtCore/QCoreApplication>
 #include <QtCore/QDebug>
 #include <QtCore/QDir>
 #include <QtCore/QFile>
@@ -29,9 +30,6 @@ constexpr const char* kObjectPath  = "/org/waywallen/waywallen/Daemon";
 constexpr const char* kInterface   = "org.waywallen.waywallen.Daemon1";
 constexpr const char* kPropsIface  = "org.freedesktop.DBus.Properties";
 
-// Wire/protocol version the UI requires from the daemon. Bump in lockstep
-// with the daemon's `Version` property when the IPC contract changes.
-constexpr quint32 kRequiredDaemonVersion = 1;
 
 DaemonDBusClient* g_instance { nullptr };
 
@@ -176,7 +174,7 @@ quint16 DaemonDBusClient::refreshWsPort() {
     QDBusMessage ver_reply = call_get(QStringLiteral("Version"));
     if (ver_reply.type() != QDBusMessage::ReplyMessage) {
         if (is_unknown_property_error(ver_reply.errorName())) {
-            m_daemon_version = 0;
+            m_daemon_version.clear();
             set_status(VersionMissing);
         } else {
             qDebug("DaemonDBusClient: Version read failed: %s (%s)",
@@ -189,19 +187,14 @@ quint16 DaemonDBusClient::refreshWsPort() {
     {
         const auto args = ver_reply.arguments();
         if (args.isEmpty()) {
-            m_daemon_version = 0;
+            m_daemon_version.clear();
             set_status(VersionMissing);
             return m_ws_port;
         }
-        bool ok = false;
-        quint32 version = unwrap_variant(args.front()).toUInt(&ok);
-        if (! ok) {
-            m_daemon_version = 0;
-            set_status(VersionMismatch);
-            return m_ws_port;
-        }
+        const QString version = unwrap_variant(args.front()).toString();
         m_daemon_version = version;
-        set_status(version == kRequiredDaemonVersion ? Connected : VersionMismatch);
+        set_status(version == QCoreApplication::applicationVersion()
+                       ? Connected : VersionMismatch);
     }
     return m_ws_port;
 }
@@ -269,7 +262,7 @@ void DaemonDBusClient::on_service_unregistered(const QString& service) {
     if (service != QString::fromLatin1(kBusName)) return;
     qDebug("DaemonDBusClient: daemon unregistered from bus");
     set_ws_port(0);
-    m_daemon_version = 0;
+    m_daemon_version.clear();
     set_status(Disconnected);
 }
 
