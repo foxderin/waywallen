@@ -12,6 +12,7 @@ use sea_orm::{
 };
 
 use super::entities::{item, item_tag, library, playlist, playlist_item, source_plugin, tag};
+use super::filter;
 use crate::media_probe::MediaMetadata;
 use crate::tasks::now_ms;
 use sea_orm::ActiveValue::NotSet;
@@ -354,6 +355,27 @@ pub async fn list_items_all(db: &DatabaseConnection) -> Result<Vec<item::Model>>
         .all(db)
         .await
         .context("select all items")
+}
+
+pub async fn list_item_keys_by_wallpaper_filters(
+    db: &DatabaseConnection,
+    filters: &[crate::control_proto::WallpaperFilterRule],
+    logics: &[crate::control_proto::FilterLogic],
+) -> Result<Vec<(String, String)>> {
+    let mut query = item::Entity::find().find_also_related(library::Entity);
+    if let Some(condition) = filter::wallpaper_filters_to_condition(filters, logics) {
+        query = query.filter(condition);
+    }
+    let rows = query
+        .order_by_asc(item::Column::LibraryId)
+        .order_by_asc(item::Column::Path)
+        .all(db)
+        .await
+        .context("select filtered item keys")?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(it, lib)| lib.map(|lib| (lib.path, it.path)))
+        .collect())
 }
 
 pub async fn list_items_by_plugin(

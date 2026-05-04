@@ -129,151 +129,6 @@ fn pb_rule_from_settings(rule: WallpaperFilterRuleState) -> pb::WallpaperFilterR
     }
 }
 
-fn wallpaper_rule_matches_string(actual: &str, filter: &pb::WallpaperStringFilter) -> bool {
-    let needle = filter.value.trim();
-    match pb::StringCondition::try_from(filter.condition) {
-        Ok(pb::StringCondition::Is) => actual.eq_ignore_ascii_case(needle),
-        Ok(pb::StringCondition::IsNot) => !actual.eq_ignore_ascii_case(needle),
-        Ok(pb::StringCondition::Contains) => actual
-            .to_ascii_lowercase()
-            .contains(&needle.to_ascii_lowercase()),
-        Ok(pb::StringCondition::ContainsNot) => !actual
-            .to_ascii_lowercase()
-            .contains(&needle.to_ascii_lowercase()),
-        _ => true,
-    }
-}
-
-fn wallpaper_rule_matches_i64(actual: Option<i64>, filter: &pb::WallpaperIntFilter) -> bool {
-    let Some(actual) = actual else {
-        return matches!(
-            pb::IntCondition::try_from(filter.condition),
-            Ok(pb::IntCondition::Unspecified)
-        );
-    };
-    match pb::IntCondition::try_from(filter.condition) {
-        Ok(pb::IntCondition::Equal) => actual == filter.value,
-        Ok(pb::IntCondition::EqualNot) => actual != filter.value,
-        Ok(pb::IntCondition::Less) => actual < filter.value,
-        Ok(pb::IntCondition::LessEqual) => actual <= filter.value,
-        Ok(pb::IntCondition::Greater) => actual > filter.value,
-        Ok(pb::IntCondition::GreaterEqual) => actual >= filter.value,
-        _ => true,
-    }
-}
-
-fn wallpaper_entry_aspect(
-    entry: &crate::wallpaper_type::WallpaperEntry,
-) -> Option<pb::WallpaperAspect> {
-    let (Some(width), Some(height)) = (entry.width, entry.height) else {
-        return None;
-    };
-    Some(if width > height {
-        pb::WallpaperAspect::Landscape
-    } else if width < height {
-        pb::WallpaperAspect::Portrait
-    } else {
-        pb::WallpaperAspect::Square
-    })
-}
-
-fn wallpaper_rule_matches(
-    entry: &crate::wallpaper_type::WallpaperEntry,
-    rule: &pb::WallpaperFilterRule,
-) -> bool {
-    use pb::wallpaper_filter_rule::Payload;
-
-    match pb::WallpaperFilterType::try_from(rule.r#type) {
-        Ok(pb::WallpaperFilterType::Name) => match rule.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => wallpaper_rule_matches_string(&entry.name, f),
-            _ => true,
-        },
-        Ok(pb::WallpaperFilterType::WpType) => match rule.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => wallpaper_rule_matches_string(&entry.wp_type, f),
-            _ => true,
-        },
-        Ok(pb::WallpaperFilterType::Library) => match rule.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => wallpaper_rule_matches_string(&entry.library_root, f),
-            _ => true,
-        },
-        Ok(pb::WallpaperFilterType::Format) => match rule.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => {
-                wallpaper_rule_matches_string(entry.format.as_deref().unwrap_or_default(), f)
-            }
-            _ => true,
-        },
-        Ok(pb::WallpaperFilterType::Width) => match rule.payload.as_ref() {
-            Some(Payload::IntFilter(f)) => {
-                wallpaper_rule_matches_i64(entry.width.map(i64::from), f)
-            }
-            _ => true,
-        },
-        Ok(pb::WallpaperFilterType::Height) => match rule.payload.as_ref() {
-            Some(Payload::IntFilter(f)) => {
-                wallpaper_rule_matches_i64(entry.height.map(i64::from), f)
-            }
-            _ => true,
-        },
-        Ok(pb::WallpaperFilterType::Size) => match rule.payload.as_ref() {
-            Some(Payload::IntFilter(f)) => wallpaper_rule_matches_i64(entry.size, f),
-            _ => true,
-        },
-        Ok(pb::WallpaperFilterType::Aspect) => match rule.payload.as_ref() {
-            Some(Payload::AspectFilter(f)) => match pb::TypeCondition::try_from(f.condition) {
-                Ok(pb::TypeCondition::Is) => {
-                    wallpaper_entry_aspect(entry) == pb::WallpaperAspect::try_from(f.value).ok()
-                }
-                Ok(pb::TypeCondition::IsNot) => {
-                    wallpaper_entry_aspect(entry) != pb::WallpaperAspect::try_from(f.value).ok()
-                }
-                _ => true,
-            },
-            _ => true,
-        },
-        _ => true,
-    }
-}
-
-fn wallpaper_rules_match(
-    entry: &crate::wallpaper_type::WallpaperEntry,
-    rules: &[pb::WallpaperFilterRule],
-    logics: &[pb::FilterLogic],
-) -> bool {
-    if rules.is_empty() {
-        return true;
-    }
-
-    let mut groups = std::collections::BTreeMap::<i32, Vec<&pb::WallpaperFilterRule>>::new();
-    for rule in rules {
-        groups.entry(rule.group).or_default().push(rule);
-    }
-
-    let mut group_values = Vec::with_capacity(groups.len());
-    for (group_id, group_rules) in groups {
-        let matched = group_rules
-            .into_iter()
-            .all(|rule| wallpaper_rule_matches(entry, rule));
-        group_values.push((group_id, matched));
-    }
-
-    let mut acc = group_values[0].1;
-    for pair in group_values.windows(2) {
-        let [(prev_group, _), (group, value)] = pair else {
-            continue;
-        };
-        let op = logics
-            .iter()
-            .find(|logic| logic.group_a == *prev_group && logic.group_b == *group)
-            .and_then(|logic| pb::LogicOp::try_from(logic.op).ok())
-            .unwrap_or(pb::LogicOp::And);
-        acc = match op {
-            pb::LogicOp::Or => acc || *value,
-            _ => acc && *value,
-        };
-    }
-    acc
-}
-
 async fn accept_loop(state: Arc<AppState>, listener: TcpListener) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -969,11 +824,30 @@ async fn dispatch_inner(
                 snap.list_by_type(&r.wp_type)
             };
 
+            let matched_keys = if r.filters.is_empty() {
+                None
+            } else {
+                Some(
+                    repo::list_item_keys_by_wallpaper_filters(
+                        &state.db,
+                        &r.filters,
+                        &r.filter_logics,
+                    )
+                    .await?
+                    .into_iter()
+                    .collect::<std::collections::HashSet<(String, String)>>(),
+                )
+            };
+
             let filtered_entries: Vec<&crate::wallpaper_type::WallpaperEntry> =
-                if !r.filters.is_empty() {
+                if let Some(matched_keys) = matched_keys.as_ref() {
                     raw_entries
                         .into_iter()
-                        .filter(|e| wallpaper_rules_match(e, &r.filters, &r.filter_logics))
+                        .filter(|e| {
+                            crate::model::sync::relative_under_root(&e.library_root, &e.resource)
+                                .map(|rel| matched_keys.contains(&(e.library_root.clone(), rel)))
+                                .unwrap_or(false)
+                        })
                         .collect()
                 } else {
                     raw_entries
@@ -1756,75 +1630,5 @@ fn entry_to_pb(
 
 #[cfg(test)]
 mod tests {
-    use super::wallpaper_rules_match;
-    use crate::control_proto as pb;
-    use crate::wallpaper_type::WallpaperEntry;
-    use std::collections::HashMap;
-
-    #[test]
-    fn grouped_wallpaper_rules_support_or_between_groups() {
-        let entry = WallpaperEntry {
-            id: "1".into(),
-            name: "City Sunset".into(),
-            wp_type: "video".into(),
-            resource: "/lib/video/city.mp4".into(),
-            preview: None,
-            metadata: HashMap::new(),
-            description: None,
-            tags: vec![],
-            external_id: None,
-            size: Some(4_096),
-            width: Some(1920),
-            height: Some(1080),
-            format: Some("mp4".into()),
-            plugin_name: "fs".into(),
-            library_root: "/lib/video".into(),
-        };
-
-        let mut name_rule = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::Name as i32,
-            group: 0,
-            payload: None,
-        };
-        name_rule.payload = Some(pb::wallpaper_filter_rule::Payload::StringFilter(
-            pb::WallpaperStringFilter {
-                value: "forest".into(),
-                condition: pb::StringCondition::Contains as i32,
-            },
-        ));
-
-        let mut width_rule = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::Width as i32,
-            group: 1,
-            payload: None,
-        };
-        width_rule.payload = Some(pb::wallpaper_filter_rule::Payload::IntFilter(
-            pb::WallpaperIntFilter {
-                value: 1900,
-                condition: pb::IntCondition::GreaterEqual as i32,
-            },
-        ));
-
-        let and_logics = vec![pb::FilterLogic {
-            op: pb::LogicOp::And as i32,
-            group_a: 0,
-            group_b: 1,
-        }];
-        assert!(!wallpaper_rules_match(
-            &entry,
-            &[name_rule.clone(), width_rule.clone()],
-            &and_logics
-        ));
-
-        let or_logics = vec![pb::FilterLogic {
-            op: pb::LogicOp::Or as i32,
-            group_a: 0,
-            group_b: 1,
-        }];
-        assert!(wallpaper_rules_match(
-            &entry,
-            &[name_rule, width_rule],
-            &or_logics
-        ));
-    }
+    // Wallpaper filter SQL tests live in `model::filter`.
 }
