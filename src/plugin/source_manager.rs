@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::media_probe::{AvFormatProbe, MediaProbe};
+use crate::probe::media::{AvFormatProbe, MediaProbe};
 use crate::model::repo;
 use crate::wallpaper_type::{WallpaperEntry, WallpaperType};
 
@@ -339,25 +339,28 @@ impl SourceManager {
         ctx.set("file_size", file_size_fn)?;
 
         // ctx.probe(path) -> table|nil
-        // Returns a table with present media fields, or nil if all fields are None.
+        // Returns a table with present file/media fields, or nil if all
+        // fields are None. Composes the cheap stat tier (size) and the
+        // libavformat tier (width/height/format) into a single table so
+        // Lua plugins keep the historical schema.
         let probe_arc = Arc::clone(&self.probe);
         let probe_fn = self.lua.create_function(move |lua, path: String| {
-            let md = probe_arc.probe(&path);
-            if md.size.is_none() && md.width.is_none() && md.height.is_none() && md.format.is_none()
-            {
+            let s = crate::probe::stat::stat_file(&path);
+            let m = probe_arc.probe_media(&path);
+            if s.is_none() && m.width.is_none() && m.height.is_none() && m.format.is_none() {
                 return Ok(mlua::Value::Nil);
             }
             let tbl = lua.create_table()?;
-            if let Some(v) = md.size {
-                tbl.set("size", v)?;
+            if let Some(s) = s {
+                tbl.set("size", s.size)?;
             }
-            if let Some(v) = md.width {
+            if let Some(v) = m.width {
                 tbl.set("width", v)?;
             }
-            if let Some(v) = md.height {
+            if let Some(v) = m.height {
                 tbl.set("height", v)?;
             }
-            if let Some(v) = md.format {
+            if let Some(v) = m.format {
                 tbl.set("format", v)?;
             }
             Ok(mlua::Value::Table(tbl))
@@ -690,14 +693,14 @@ fn json_to_lua(lua: &Lua, val: &serde_json::Value) -> LuaResult<LuaValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_probe::{MediaMetadata, MediaProbe};
+    use crate::probe::media::{MediaMeta, MediaProbe};
     use std::io::Write;
 
     struct FakeProbe {
-        meta: MediaMetadata,
+        meta: MediaMeta,
     }
     impl MediaProbe for FakeProbe {
-        fn probe(&self, _path: &str) -> MediaMetadata {
+        fn probe_media(&self, _path: &str) -> MediaMeta {
             self.meta.clone()
         }
     }
@@ -723,8 +726,7 @@ mod tests {
     #[test]
     fn ctx_probe_callable_from_lua() {
         let probe = Arc::new(FakeProbe {
-            meta: MediaMetadata {
-                size: Some(1234),
+            meta: MediaMeta {
                 width: Some(1920),
                 height: Some(1080),
                 format: Some("matroska,webm".to_owned()),

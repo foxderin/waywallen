@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-use media_probe::{AvFormatProbe, MediaProbe};
+use probe::media::{AvFormatProbe, MediaProbe};
 
 mod control;
 mod control_proto;
@@ -12,12 +12,11 @@ mod display;
 mod error;
 mod events;
 mod ipc;
-mod media_probe;
 mod model;
 mod negotiate;
 mod playlist;
 mod plugin;
-mod probe_task;
+mod probe;
 mod renderer_manager;
 mod routing;
 mod scheduler;
@@ -585,7 +584,7 @@ async fn async_main() -> anyhow::Result<()> {
         state
             .tasks
             .spawn_async(tasks::TaskKind::Service, "probe/scheduler", async move {
-                probe_task::scheduler_loop(db_for_task, probe_for_task, shutdown_for_task)
+                probe::task::scheduler_loop(db_for_task, probe_for_task, shutdown_for_task)
                     .await
                     .map_err(anyhow::Error::from)
             });

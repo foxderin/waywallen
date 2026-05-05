@@ -34,11 +34,17 @@ pub struct Model {
     /// Milliseconds since UNIX epoch. Refreshed any time the daemon
     /// "sees" the item — both scan-sync and probe-task ticks.
     pub sync_at: i64,
-    /// Milliseconds since UNIX epoch of the last probe attempt
-    /// (success or no-op). `None` means never probed. Drives the
-    /// probe-task cooldown so re-tries don't storm; `sync_at`
-    /// alone can't fill this role because sync also bumps it.
+    /// Milliseconds since UNIX epoch of the last media-probe attempt.
+    /// Cooldown anchor for libavformat-backed probing.
     pub probed_at: Option<i64>,
+    /// File mtime in milliseconds since UNIX epoch, captured by the
+    /// stat tier of the probe scheduler. Distinct from `update_at`
+    /// (which tracks the DB row), and from `sync_at` (which tracks
+    /// the daemon "seeing" the item). Drives media-probe invalidation:
+    /// when this advances past `probed_at`, the file is re-probed.
+    pub modified_at: Option<i64>,
+    /// Cooldown anchor for the stat tier. `None` means never stat'd.
+    pub stat_at: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

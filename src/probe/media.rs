@@ -1,23 +1,18 @@
 //! Fail-soft media metadata probe.
 //!
 //! Lazy-loads `libavformat` via `libloading` (no link-time dep on FFmpeg) and
-//! exposes a tiny [`MediaProbe`] trait whose `probe` method is total: it never
-//! returns `Err` and never panics. When libavformat cannot be loaded — or its
-//! ABI doesn't match what we coded against — the probe degrades gracefully to
-//! filling only `size` from `std::fs::metadata`.
-//!
-//! The cross-agent contract for this module lives in
-//! `.plans/media-meta/notes.md`. Don't change shapes here without updating
-//! that file.
+//! exposes a tiny [`MediaProbe`] trait whose `probe_media` method is total: it
+//! never returns `Err` and never panics. When libavformat cannot be loaded —
+//! or its ABI doesn't match what we coded against — the probe returns an empty
+//! [`MediaMeta`] with all fields `None`.
 //!
 //! Supported `libavformat` SONAMEs: 60 (FFmpeg 6.x), 61 (FFmpeg 7.x),
-//! 62 (FFmpeg 8.x devel). Other majors fall back to size-only because the
+//! 62 (FFmpeg 8.x devel). Other majors fall back to no-op because the
 //! `AVCodecParameters` layout shifted in FFmpeg 7.0 (added `coded_side_data`
 //! between `extradata_size` and `format`). When that happens we still log a
 //! single warning per process and never retry.
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
-use std::fs;
 use std::ptr;
 use std::sync::Mutex;
 
@@ -43,10 +38,10 @@ const AV_LOG_QUIET: c_int = -8;
 /// majors we care about).
 const AVMEDIA_TYPE_VIDEO: c_int = 0;
 
-/// Result of a probe. All fields optional; absence means "unknown".
+/// Result of a media probe. All fields optional; absence means "unknown".
+/// File size is NOT here — that's [`super::stat::FileStat`]'s job.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MediaMetadata {
-    pub size: Option<i64>,
+pub struct MediaMeta {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub format: Option<String>,
@@ -55,7 +50,7 @@ pub struct MediaMetadata {
 /// Probe contract. Implementations must be `Send + Sync` so they can be
 /// shared across the `SourceManager` `Arc`.
 pub trait MediaProbe: Send + Sync {
-    fn probe(&self, path: &str) -> MediaMetadata;
+    fn probe_media(&self, path: &str) -> MediaMeta;
 }
 
 /// libavformat-backed probe. Lazy-loaded; cached after the first attempt.
@@ -281,28 +276,16 @@ impl Default for AvFormatProbe {
 }
 
 impl MediaProbe for AvFormatProbe {
-    fn probe(&self, path: &str) -> MediaMetadata {
-        let mut meta = MediaMetadata::default();
-
-        // `size` is independent of libavformat; fill from std::fs::metadata.
-        // Missing files / permission errors → leave size as None.
-        if let Ok(md) = fs::metadata(path) {
-            if let Ok(len) = i64::try_from(md.len()) {
-                meta.size = Some(len);
-            }
-        }
-
+    fn probe_media(&self, path: &str) -> MediaMeta {
+        let mut meta = MediaMeta::default();
         if !self.ensure_loaded() {
-            // Single-line warn, as required by the implementation guide.
-            // Use `target` so consumers can mute it independently.
             warn!(
-                target: "waywallen::media_probe",
-                "libavformat unavailable; size-only probe for {:?}",
+                target: "waywallen::probe::media",
+                "libavformat unavailable; skipping media probe for {:?}",
                 path
             );
             return meta;
         }
-
         let (width, height, format) = self.probe_with_libav(path);
         meta.width = width;
         meta.height = height;
@@ -344,7 +327,7 @@ fn try_load_libavformat() -> Option<LoadedLib> {
                 Ok(sym) => (unsafe { sym() }) >> 16,
                 Err(_) => {
                     warn!(
-                        target: "waywallen::media_probe",
+                        target: "waywallen::probe::media",
                         "{soname}: avformat_version missing; size-only fallback"
                     );
                     continue;
@@ -356,7 +339,7 @@ fn try_load_libavformat() -> Option<LoadedLib> {
             61 | 62 => CODECPAR_FFMPEG_7_PLUS,
             other => {
                 warn!(
-                    target: "waywallen::media_probe",
+                    target: "waywallen::probe::media",
                     "{soname}: unsupported libavformat major={other}; size-only fallback"
                 );
                 continue;
@@ -396,7 +379,7 @@ fn try_load_libavformat() -> Option<LoadedLib> {
         };
 
         log::info!(
-            target: "waywallen::media_probe",
+            target: "waywallen::probe::media",
             "{soname}: libavformat major={major} loaded — full media probe enabled"
         );
         return Some(LoadedLib {
@@ -413,7 +396,7 @@ fn try_load_libavformat() -> Option<LoadedLib> {
 mod tests {
     use super::*;
 
-    /// Required check (T-101): missing path → all fields None.
+    /// Missing path → all fields None.
     /// Two probes to confirm the cached state is reused without panicking.
     #[test]
     fn probe_missing_returns_none() {
@@ -421,29 +404,11 @@ mod tests {
         let path = "/this/path/definitely/does/not/exist";
 
         for _ in 0..2 {
-            let meta = probe.probe(path);
-            assert_eq!(meta.size, None, "size must be None for missing file");
+            let meta = probe.probe_media(path);
             assert_eq!(meta.width, None);
             assert_eq!(meta.height, None);
             assert_eq!(meta.format, None);
         }
-    }
-
-    /// Optional second test from the spec: real file → size at minimum.
-    #[test]
-    fn probe_real_file_extracts_size_at_minimum() {
-        use std::io::Write;
-        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
-        let payload = b"hello waywallen media probe test bytes";
-        tmp.write_all(payload).expect("write tempfile");
-        tmp.flush().expect("flush tempfile");
-
-        let probe = AvFormatProbe::new();
-        let meta = probe.probe(tmp.path().to_str().expect("utf8 path"));
-        assert_eq!(meta.size, Some(payload.len() as i64));
-        // width/height/format may or may not populate (this isn't a
-        // valid container); just assert no panic.
-        let _ = (meta.width, meta.height, meta.format);
     }
 
     /// Trait-object usage check: ensures `AvFormatProbe` can stand in
@@ -451,7 +416,7 @@ mod tests {
     #[test]
     fn dyn_dispatch_compiles_and_runs() {
         let probe: std::sync::Arc<dyn MediaProbe> = std::sync::Arc::new(AvFormatProbe::new());
-        let _ = probe.probe("/nope");
+        let _ = probe.probe_media("/nope");
     }
 
     /// If libavformat is available, verify it actually parses a real
@@ -486,8 +451,7 @@ mod tests {
         tmp.flush().unwrap();
 
         let probe = AvFormatProbe::new();
-        let meta = probe.probe(tmp.path().to_str().unwrap());
-        assert_eq!(meta.size, Some(45));
+        let meta = probe.probe_media(tmp.path().to_str().unwrap());
         // If libavformat is available on the test host, format should
         // come back. If not, that's also fine — the test just verifies
         // we don't crash and size is correct.

@@ -13,7 +13,8 @@ use sea_orm::{
 
 use super::entities::{item, item_tag, library, playlist, playlist_item, source_plugin, tag};
 use super::filter;
-use crate::media_probe::MediaMetadata;
+use crate::probe::media::MediaMeta;
+use crate::probe::stat::FileStat;
 use crate::tasks::now_ms;
 use sea_orm::ActiveValue::NotSet;
 
@@ -407,40 +408,40 @@ pub async fn delete_items_missing(
     Ok(res.rows_affected)
 }
 
-/// Items that still have at least one missing media-meta field, where
-/// either we've never probed them or the last probe attempt was older
-/// than `cooldown_cutoff_ms`. Used by the background probe scheduler
-/// to avoid hammering files that have already been looked at recently
-/// (success or no-op).
+/// Items needing either a stat-tier refresh OR a media-tier probe.
 ///
-/// `probed_at` (not `sync_at`) gates the cooldown because `sync_at`
-/// also bumps on every scan-sync — using it would lock out every
-/// freshly-imported row from the post-refresh drain.
+/// Returns rows where any of:
+/// * `stat_at` is NULL or older than `stat_cutoff_ms` (cheap tier)
+/// * `probed_at` is NULL or older than `media_cutoff_ms` (media tier)
+/// * `modified_at > probed_at` (file changed since last media probe)
 ///
 /// Returned alongside each item is the absolute `library.path`
 /// (joined with `item.path` in the caller to form the on-disk path).
-pub async fn list_items_pending_probe(
+pub async fn list_items_pending(
     db: &DatabaseConnection,
-    cooldown_cutoff_ms: i64,
+    stat_cutoff_ms: i64,
+    media_cutoff_ms: i64,
     limit: u64,
 ) -> Result<Vec<(item::Model, String)>> {
+    use sea_orm::sea_query::Expr;
     use sea_orm::Condition;
 
     let rows = item::Entity::find()
         .filter(
             Condition::any()
-                .add(item::Column::Size.is_null())
-                .add(item::Column::Width.is_null())
-                .add(item::Column::Height.is_null())
-                .add(item::Column::Format.is_null()),
-        )
-        .filter(
-            Condition::any()
+                .add(item::Column::StatAt.is_null())
+                .add(item::Column::StatAt.lt(stat_cutoff_ms))
                 .add(item::Column::ProbedAt.is_null())
-                .add(item::Column::ProbedAt.lt(cooldown_cutoff_ms)),
+                .add(item::Column::ProbedAt.lt(media_cutoff_ms))
+                // SQLite treats NULL comparisons as NULL ⇒ false, so
+                // rows where modified_at IS NULL are excluded here —
+                // they'll be picked up by the stat-stale arm above.
+                .add(
+                    Expr::col(item::Column::ProbedAt)
+                        .lt(Expr::col(item::Column::ModifiedAt)),
+                ),
         )
-        // NULLs sort first in SQLite, so never-probed rows come ahead
-        // of long-cooldown ones. That's the desired priority.
+        .order_by_asc(item::Column::StatAt)
         .order_by_asc(item::Column::ProbedAt)
         .limit(limit)
         .find_also_related(library::Entity)
@@ -454,26 +455,64 @@ pub async fn list_items_pending_probe(
         .collect())
 }
 
-/// Apply a probe result to a single item. Always bumps `sync_at` and
-/// `probed_at`. Only fields the probe actually filled overwrite
-/// existing columns; `None` means "unknown — leave whatever was
-/// there alone". `update_at` is bumped only when at least one of
-/// the four media columns actually changed value; a no-op probe
-/// (libavformat unavailable, codec parameters not exposed, etc.)
-/// leaves `update_at` alone but still stamps `probed_at` so the
-/// cooldown filter knows we tried.
+/// Result of a single update — true if any persisted column changed value.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ItemWriteOutcome {
+    pub changed: bool,
+}
+
+/// Tier-1 stat result: writes `size`, `modified_at`, `stat_at`. Bumps
+/// `update_at` only when size or modified_at actually changed; a no-op
+/// stat (file unchanged) still stamps `stat_at` so the cooldown filter
+/// knows we tried.
+pub async fn update_item_stat(
+    db: &DatabaseConnection,
+    id: i64,
+    stat: &FileStat,
+) -> Result<ItemWriteOutcome> {
+    let existing = item::Entity::find_by_id(id)
+        .one(db)
+        .await
+        .with_context(|| format!("reload item id={id}"))?
+        .ok_or_else(|| Error::Internal(anyhow!("item id={id} disappeared before stat write")))?;
+
+    let new_size = Some(stat.size);
+    let new_modified = Some(stat.modified_at);
+    let changed = new_size != existing.size || new_modified != existing.modified_at;
+
+    let now = now_ms();
+    let mut am: item::ActiveModel = existing.into();
+    if changed {
+        am.size = Set(new_size);
+        am.modified_at = Set(new_modified);
+        am.update_at = Set(now);
+    } else {
+        am.size = NotSet;
+        am.modified_at = NotSet;
+        am.update_at = NotSet;
+    }
+    am.stat_at = Set(Some(now));
+    am.update(db)
+        .await
+        .with_context(|| format!("update item stat id={id}"))?;
+    Ok(ItemWriteOutcome { changed })
+}
+
+/// Tier-2 media probe result: writes `width`, `height`, `format`, and
+/// `probed_at`. `None` in `meta` means "unknown — leave existing alone".
+/// `update_at` is bumped only when at least one of the three media
+/// columns actually changed.
 pub async fn update_item_media(
     db: &DatabaseConnection,
     id: i64,
-    meta: &MediaMetadata,
-) -> Result<()> {
+    meta: &MediaMeta,
+) -> Result<ItemWriteOutcome> {
     let existing = item::Entity::find_by_id(id)
         .one(db)
         .await
         .with_context(|| format!("reload item id={id}"))?
         .ok_or_else(|| Error::Internal(anyhow!("item id={id} disappeared before probe write")))?;
 
-    let new_size = meta.size.or(existing.size);
     let new_width = meta
         .width
         .and_then(|v| i32::try_from(v).ok())
@@ -484,34 +523,28 @@ pub async fn update_item_media(
         .or(existing.height);
     let new_format = meta.format.clone().or_else(|| existing.format.clone());
 
-    let changed = new_size != existing.size
-        || new_width != existing.width
+    let changed = new_width != existing.width
         || new_height != existing.height
         || new_format != existing.format;
 
     let now = now_ms();
     let mut am: item::ActiveModel = existing.into();
     if changed {
-        am.size = Set(new_size);
         am.width = Set(new_width);
         am.height = Set(new_height);
         am.format = Set(new_format);
         am.update_at = Set(now);
     } else {
-        // Explicitly mark unchanged columns as NotSet so SeaORM
-        // doesn't emit them in the UPDATE.
-        am.size = NotSet;
         am.width = NotSet;
         am.height = NotSet;
         am.format = NotSet;
         am.update_at = NotSet;
     }
-    am.sync_at = Set(now);
     am.probed_at = Set(Some(now));
     am.update(db)
         .await
         .with_context(|| format!("update item media id={id}"))?;
-    Ok(())
+    Ok(ItemWriteOutcome { changed })
 }
 
 // ---------------------------------------------------------------------------

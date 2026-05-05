@@ -2,19 +2,19 @@
 //! installed — the AvFormatProbe actually extracts a real format
 //! string from a tiny on-disk WAV file. Skipped (with eprintln!) if
 //! libavformat isn't loadable.
+//!
+//! Also smoke-tests `probe::stat::stat_file` because size/mtime now
+//! live there, decoupled from the libavformat path.
 use std::io::Write;
-use waywallen::media_probe::{AvFormatProbe, MediaProbe};
+use waywallen::probe::media::{AvFormatProbe, MediaProbe};
+use waywallen::probe::stat;
 
 #[test]
 fn probe_extracts_wav_format_on_hosts_with_libavformat() {
-    // Self-skip if no libavformat on this host. We detect this by
-    // probing a missing path first; if that fails to load libav the
-    // following real probe also won't.
     let probe = AvFormatProbe::new();
-    let probe_smoke = probe.probe("/__definitely_missing__");
-    // size/width/height/format all None for a missing file in either
-    // case. We need a positive signal that libav loaded — which we
-    // get by checking a real WAV's format below.
+    let probe_smoke = probe.probe_media("/__definitely_missing__");
+    // width/height/format all None for a missing file. We need a positive
+    // signal that libav loaded — which we get from a real WAV below.
 
     let mut tmp = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
     let header: [u8; 44] = [
@@ -25,9 +25,9 @@ fn probe_extracts_wav_format_on_hosts_with_libavformat() {
     tmp.write_all(&header).unwrap();
     tmp.write_all(&[0x80]).unwrap();
     tmp.flush().unwrap();
+    let path = tmp.path().to_str().unwrap();
 
-    let meta = probe.probe(tmp.path().to_str().unwrap());
-    assert_eq!(meta.size, Some(45), "size must be filled regardless");
+    let meta = probe.probe_media(path);
     match meta.format {
         Some(fmt) => {
             eprintln!("libavformat OK — extracted format={fmt:?}");
@@ -40,6 +40,13 @@ fn probe_extracts_wav_format_on_hosts_with_libavformat() {
             eprintln!("libavformat unavailable on this host — full probe skipped");
         }
     }
-    // Sanity: smoke probe matches none-ness for a missing file.
-    assert_eq!(probe_smoke.size, None);
+    assert_eq!(probe_smoke.format, None);
+
+    // Stat tier owns size + mtime now.
+    let s = stat::stat_file(path).expect("stat_file on real tempfile");
+    assert_eq!(s.size, 45);
+    assert!(s.modified_at > 0);
+
+    let missing = stat::stat_file("/__definitely_missing__");
+    assert!(missing.is_none(), "missing file → None");
 }
