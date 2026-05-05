@@ -86,13 +86,7 @@ pub fn wallpaper_filter_to_condition(filter: &pb::WallpaperFilterRule) -> Option
 
     match pb::WallpaperFilterType::try_from(filter.r#type).ok()? {
         pb::WallpaperFilterType::Name => match filter.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => string_condition_to_condition(
-                || Expr::col((item::Entity, item::Column::DisplayName)),
-                pb::StringCondition::try_from(f.condition)
-                    .unwrap_or(pb::StringCondition::Unspecified),
-                &f.value,
-                false,
-            ),
+            Some(Payload::StringFilter(f)) => name_condition_to_condition(f),
             _ => None,
         },
         pb::WallpaperFilterType::WpType => match filter.payload.as_ref() {
@@ -158,6 +152,53 @@ pub fn wallpaper_filter_to_condition(filter: &pb::WallpaperFilterRule) -> Option
         },
         pb::WallpaperFilterType::Unspecified => None,
     }
+}
+
+fn name_condition_to_condition(filter: &pb::WallpaperStringFilter) -> Option<Condition> {
+    let cond =
+        pb::StringCondition::try_from(filter.condition).unwrap_or(pb::StringCondition::Unspecified);
+    match cond {
+        pb::StringCondition::Contains | pb::StringCondition::ContainsNot => {
+            let fts_query = build_fts_match_query(&filter.value)?;
+            let quoted = sqlite_quote(&fts_query);
+            let sql = match cond {
+                pb::StringCondition::Contains => {
+                    format!("item.id IN (SELECT rowid FROM item_fts WHERE item_fts MATCH {quoted})")
+                }
+                pb::StringCondition::ContainsNot => {
+                    format!(
+                        "item.id NOT IN (SELECT rowid FROM item_fts WHERE item_fts MATCH {quoted})"
+                    )
+                }
+                _ => unreachable!(),
+            };
+            Some(Condition::all().add(Expr::cust(sql)))
+        }
+        _ => string_condition_to_condition(
+            || Expr::col((item::Entity, item::Column::DisplayName)),
+            cond,
+            &filter.value,
+            false,
+        ),
+    }
+}
+
+fn build_fts_match_query(input: &str) -> Option<String> {
+    let terms: Vec<String> = input
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" AND "))
+    }
+}
+
+fn sqlite_quote(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "''"))
 }
 
 fn string_condition_to_condition<E>(
