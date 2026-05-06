@@ -1,10 +1,10 @@
 pub mod control_proto;
 pub mod display;
+pub mod dma;
 pub mod error;
 pub mod events;
 pub mod ipc;
 pub mod model;
-pub mod negotiate;
 pub mod queue;
 pub mod plugin;
 pub mod probe;

@@ -857,7 +857,7 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
     // renderer. Wlroots dmabuf-feedback v4 would expose a main_device
     // we could thread through here — left as a follow-up.
     {
-        use waywallen::negotiate as N;
+        use waywallen::dma::negotiate as N;
         // Flatten dmabuf_caps directly into the wire-format parallel
         // arrays under a single lock acquisition. usages/plane_counts
         // are constant per-modifier here, so bulk-fill them with

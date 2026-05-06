@@ -1,31 +1,6 @@
-//! Modifier / format / sync / color negotiation engine.
-//!
-//! Pure data + pure functions. No locks, no I/O. Called from the
-//! router whenever (renderer caps, consumer caps, link topology)
-//! changes; the result is a [`NegotiatedScheme`] the daemon dispatches
-//! to the renderer via `negotiate_buffers` and uses to gate
-//! `bind_buffers` flow downstream.
-//!
-//! Wire format: parallel arrays decoded by [`unflatten_caps`]. Both
-//! `format_caps` (renderer→daemon, ipc-v2) and `consumer_caps`
-//! (consumer→daemon, display-v2) share the same shape; only the
-//! `DeviceIdentity` source differs.
-//!
-//! Iter 1 (this file at landing time): scaffolding only. [`pick`]
-//! always returns a deterministic `(ABGR8888, LINEAR, TIMELINE)`
-//! scheme so the surrounding plumbing can be wired up without
-//! depending on real peer probes. Iter 2 replaces [`pick`] with the
-//! real intersection logic. Both UUID matching and per-axis
-//! intersection helpers below are already wired up so iter 2 only
-//! has to implement the policy.
-
 use std::collections::{BTreeMap, HashSet};
 
 use crate::renderer_manager::DrmNode;
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 /// Per-(fourcc, modifier) capability descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

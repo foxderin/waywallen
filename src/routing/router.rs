@@ -105,7 +105,7 @@ pub struct DisplayRegistration {
     /// `register_display`). `None` if the consumer hasn't been
     /// ported to v2; the router falls back to legacy behavior in
     /// that case.
-    pub consumer_caps: Option<crate::negotiate::PeerCaps>,
+    pub consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
 }
 
 /// Returned from `register_display` — the assigned id plus the rx end
@@ -221,7 +221,7 @@ struct DisplayState {
     /// `consumer_caps` request has been received (or forever for
     /// legacy clients). The router pairs this with the bound
     /// renderer's `format_caps` to compute a `NegotiatedScheme`.
-    consumer_caps: Option<crate::negotiate::PeerCaps>,
+    consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
 }
 
 struct Inner {
@@ -687,7 +687,7 @@ impl Router {
     pub async fn set_consumer_caps(
         self: &Arc<Self>,
         display_id: DisplayId,
-        caps: crate::negotiate::PeerCaps,
+        caps: crate::dma::negotiate::PeerCaps,
     ) {
         {
             let mut inner = self.inner.lock().await;
@@ -702,7 +702,7 @@ impl Router {
 
     /// Iter 5: consumer reported a `bind_failed` for `(fourcc, modifier)`.
     /// Add the pair to this consumer's blacklist on its
-    /// [`crate::negotiate::PeerCaps`] and re-run the picker so the
+    /// [`crate::dma::negotiate::PeerCaps`] and re-run the picker so the
     /// daemon dispatches a fallback scheme. No-op for legacy
     /// consumers that never sent `consumer_caps` (they have nowhere
     /// to put a blacklist).
@@ -732,7 +732,7 @@ impl Router {
 
     /// Iter 5: renderer reported a `bind_failed` for `(fourcc, modifier)`.
     /// Add the pair to this producer's blacklist on its
-    /// [`crate::negotiate::PeerCaps`] and re-run the picker so the
+    /// [`crate::dma::negotiate::PeerCaps`] and re-run the picker so the
     /// daemon dispatches a fallback scheme. No-op for legacy
     /// producers that never sent `format_caps`.
     pub async fn on_renderer_bind_failed(
@@ -1421,8 +1421,8 @@ impl Router {
         struct Pair {
             rid: RendererId,
             did: DisplayId,
-            producer: crate::negotiate::PeerCaps,
-            consumer: crate::negotiate::PeerCaps,
+            producer: crate::dma::negotiate::PeerCaps,
+            consumer: crate::dma::negotiate::PeerCaps,
         }
         let pairs: Vec<Pair> = {
             let inner = self.inner.lock().await;
@@ -1465,10 +1465,10 @@ impl Router {
         // identical hardcoded LINEAR caps.)
         let mut by_renderer: std::collections::HashMap<
             RendererId,
-            crate::negotiate::NegotiatedScheme,
+            crate::dma::negotiate::NegotiatedScheme,
         > = std::collections::HashMap::new();
         for p in pairs {
-            match crate::negotiate::pick(&p.producer, &p.consumer) {
+            match crate::dma::negotiate::pick(&p.producer, &p.consumer) {
                 Ok(scheme) => {
                     log::info!(
                         "router: pick({rid}, display {did}) = \
@@ -2134,8 +2134,8 @@ mod tests {
 
     /// Build a single-fourcc PeerCaps with the given (modifier,plane_count) list.
     /// Mirrors `negotiate::tests::caps_one_fourcc` but in scope here.
-    fn build_caps(fourcc: u32, mods: &[(u64, u32)], uuid_byte: u8) -> crate::negotiate::PeerCaps {
-        use crate::negotiate as N;
+    fn build_caps(fourcc: u32, mods: &[(u64, u32)], uuid_byte: u8) -> crate::dma::negotiate::PeerCaps {
+        use crate::dma::negotiate as N;
         let mod_count = mods.len() as u32;
         let modifiers: Vec<u64> = mods.iter().map(|(m, _)| *m).collect();
         let plane_counts: Vec<u32> = mods.iter().map(|(_, p)| *p).collect();
@@ -2169,7 +2169,7 @@ mod tests {
         // grow by one entry; reconcile_buffer_flags is called as a
         // side effect (we don't observe it directly here — covered
         // by the next test).
-        use crate::negotiate as N;
+        use crate::dma::negotiate as N;
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         add_stub_renderer(&mgr, &router, "R1").await;
@@ -2196,7 +2196,7 @@ mod tests {
     #[tokio::test]
     async fn renderer_bind_failed_inserts_blacklist() {
         // Same shape as the consumer test, but on the producer side.
-        use crate::negotiate as N;
+        use crate::dma::negotiate as N;
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         let h = RendererHandle::test_stub("R1", "scene");
@@ -2230,7 +2230,7 @@ mod tests {
         // EPIPE and never records the scheme. Instead, drive the
         // picker directly with the post-mutation peer caps — that
         // proves the blacklist mutation reached the right `PeerCaps`.
-        use crate::negotiate as N;
+        use crate::dma::negotiate as N;
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
 

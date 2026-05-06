@@ -10,3 +10,4 @@ build
 /install/
 *.AppImage
 CMakeUserPresets.json
+/waywallen-test*.md

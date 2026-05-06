@@ -354,7 +354,7 @@ async fn run_frame_loop(
                     let drm = crate::renderer_manager::DrmNode {
                         major: drm_render_major, minor: drm_render_minor,
                     };
-                    match crate::negotiate::unflatten_caps(
+                    match crate::dma::negotiate::unflatten_caps(
                         &fourccs, &mod_counts, &modifiers, &usages, &plane_counts,
                         &device_uuid, &driver_uuid, drm,
                         sync_caps, color_caps, mem_hints,

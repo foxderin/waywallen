@@ -230,13 +230,13 @@ pub struct RendererHandle {
     /// implement Iter 2 yet leave it empty, in which case the
     /// daemon skips negotiation for them and Iter 1 behavior
     /// (blind forward) prevails.
-    format_caps: Arc<StdMutex<Option<crate::negotiate::PeerCaps>>>,
+    format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
 
     /// Last `NegotiatedScheme` the daemon dispatched via
     /// `NegotiateBuffers` to this renderer. Used for idempotence in
     /// `send_negotiate_buffers` — repeat calls with the same scheme
     /// short-circuit. `None` until the first dispatch.
-    last_dispatched_scheme: Arc<StdMutex<Option<crate::negotiate::NegotiatedScheme>>>,
+    last_dispatched_scheme: Arc<StdMutex<Option<crate::dma::negotiate::NegotiatedScheme>>>,
 
     /// Sink for per-frame [`crate::sync::FrameRecord`]s. The display
     /// endpoint pushes one record per consumer per frame; the reaper
@@ -334,7 +334,7 @@ impl RendererHandle {
     /// arrived (or forever, for renderers that haven't been ported to
     /// Iter 2). The router calls this on every reconcile pass; it's
     /// cheap (cloning a HashMap of small structs).
-    pub fn format_caps(&self) -> Option<crate::negotiate::PeerCaps> {
+    pub fn format_caps(&self) -> Option<crate::dma::negotiate::PeerCaps> {
         self.format_caps.lock().ok().and_then(|g| g.clone())
     }
 
@@ -357,17 +357,17 @@ impl RendererHandle {
         caps.blacklist.insert((fourcc, modifier))
     }
 
-    /// Most recently dispatched [`crate::negotiate::NegotiatedScheme`]
+    /// Most recently dispatched [`crate::dma::negotiate::NegotiatedScheme`]
     /// for this renderer. `None` until the daemon has run a successful
     /// `pick` and called `send_negotiate_buffers`. Used by the router
     /// to gate `Bind`/`Frame` dispatch — frames are silently held
     /// until `bind_snapshot` matches the dispatched scheme.
-    pub fn current_scheme(&self) -> Option<crate::negotiate::NegotiatedScheme> {
+    pub fn current_scheme(&self) -> Option<crate::dma::negotiate::NegotiatedScheme> {
         self.last_dispatched_scheme.lock().ok().and_then(|g| *g)
     }
 
     /// True iff the renderer's most recent `BindBuffers` snapshot
-    /// matches the most recently dispatched [`crate::negotiate::NegotiatedScheme`]
+    /// matches the most recently dispatched [`crate::dma::negotiate::NegotiatedScheme`]
     /// on `(fourcc, modifier)`. Returns `false` if either side is
     /// missing — the gate stays closed until both arrive. Caller is
     /// responsible for ensuring v2 negotiation actually applies (i.e.
@@ -603,7 +603,7 @@ impl RendererManager {
         let sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>> =
             Arc::new(StdMutex::new(std::collections::VecDeque::new()));
         let release_syncobj: Arc<StdMutex<Option<OwnedFd>>> = Arc::new(StdMutex::new(None));
-        let format_caps: Arc<StdMutex<Option<crate::negotiate::PeerCaps>>> =
+        let format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>> =
             Arc::new(StdMutex::new(None));
         let pending_configure: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
 
@@ -791,7 +791,7 @@ impl RendererManager {
     pub async fn send_negotiate_buffers(
         &self,
         id: &str,
-        scheme: crate::negotiate::NegotiatedScheme,
+        scheme: crate::dma::negotiate::NegotiatedScheme,
     ) -> Result<()> {
         let handle = self
             .get(id)
@@ -952,7 +952,7 @@ fn run_reader(
     bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
     sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>>,
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
-    format_caps: Arc<StdMutex<Option<crate::negotiate::PeerCaps>>>,
+    format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
     pending_configure: Arc<StdMutex<Option<u32>>>,
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
 ) {
@@ -1140,7 +1140,7 @@ fn run_reader(
                 major: drm_render_major,
                 minor: drm_render_minor,
             };
-            match crate::negotiate::unflatten_caps(
+            match crate::dma::negotiate::unflatten_caps(
                 fourccs,
                 mod_counts,
                 modifiers,
@@ -1344,7 +1344,7 @@ impl RendererHandle {
     /// Test-only: inject a `PeerCaps` so router-level negotiation
     /// tests can pretend the renderer shipped a `FormatCaps` event.
     /// Replaces whatever was there.
-    pub fn test_set_format_caps(&self, caps: crate::negotiate::PeerCaps) {
+    pub fn test_set_format_caps(&self, caps: crate::dma::negotiate::PeerCaps) {
         if let Ok(mut g) = self.format_caps.lock() {
             *g = Some(caps);
         }

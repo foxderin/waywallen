@@ -137,7 +137,7 @@ fn release_syncobj_round_trip() {
                 extent_max_w,
                 extent_max_h,
             } => {
-                use waywallen::negotiate as N;
+                use waywallen::dma::negotiate as N;
                 let caps = N::unflatten_caps(
                     &fourccs,
                     &mod_counts,
