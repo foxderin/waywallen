@@ -92,6 +92,13 @@ Q_SIGNALS:
     /// not relayed here — receivers re-query so they go through the
     /// same parsing path as the initial load.
     void settingsChanged();
+    /// Daemon's display endpoint rejected an external display client at
+    /// handshake (version mismatch / bad protocol name). Window.qml
+    /// turns this into a toast.
+    void displayConnectionFailed(const QString& clientName,
+                                 quint32        clientProtocolVersion,
+                                 quint32        errorCode,
+                                 const QString& reason);
 
 private:
     bool        m_scan_in_progress { false };

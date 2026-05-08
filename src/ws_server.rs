@@ -533,6 +533,21 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
                 paths: paths.clone(),
             })),
         }),
+        GlobalEvent::DisplayConnectionFailed {
+            client_name,
+            client_protocol_version,
+            error_code,
+            reason,
+        } => Some(pb::Event {
+            payload: Some(pb::event::Payload::DisplayConnectionFailed(
+                pb::DisplayConnectionFailed {
+                    client_name: client_name.clone(),
+                    client_protocol_version: *client_protocol_version,
+                    error_code: *error_code,
+                    reason: reason.clone(),
+                },
+            )),
+        }),
         GlobalEvent::SettingsChanged => {
             let snap = state.settings.snapshot();
             let filter_state = snap.global.wallpaper_filter.clone();

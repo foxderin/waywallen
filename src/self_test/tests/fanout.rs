@@ -130,11 +130,12 @@ async fn run_async(
     let sock_dir = make_socket_dir().context("tempdir for endpoint socket")?;
     let sock = sock_dir.join("display.sock");
     let (sd_tx, sd_rx) = tokio::sync::watch::channel(false);
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel(8);
     let serve_handle = {
         let r = Arc::clone(&router);
         let s = sock.clone();
         tokio::spawn(async move {
-            let _ = endpoint::serve_with_shutdown(&s, r, sd_rx).await;
+            let _ = endpoint::serve_with_shutdown(&s, r, events_tx, sd_rx).await;
         })
     };
     wait_for_sock_ready(&sock, Duration::from_secs(5)).await?;

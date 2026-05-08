@@ -568,6 +568,23 @@ message LibrariesAdded {
   repeated string paths = 1;
 }
 
+// External display client failed handshake on the daemon's UDS endpoint
+// (bad protocol name or unsupported protocol version). Transient — UI
+// surfaces a toast so the user notices a stale waywallen-display binary
+// instead of silently getting no wallpapers.
+message DisplayConnectionFailed {
+  // Echoed from the rejected client's `Hello.client_name`. Empty when
+  // the failure happened before a Hello was parsed.
+  string client_name              = 1;
+  // Echoed from `Hello.client_protocol_version`. 0 when unavailable.
+  uint32 client_protocol_version  = 2;
+  // Same code as the wire `error` event (see error_code in
+  // waywallen_display_v1.xml): 1=PROTO_NAME_MISMATCH, 2=VERSION_UNSUPPORTED.
+  uint32 error_code               = 3;
+  // One-line human-readable reason — same string sent on the wire.
+  string reason                   = 4;
+}
+
 // A wallpaper sync finished. `count` is the total entry count after
 // the swap; `error` is empty on success, otherwise a one-line reason.
 // UI typically reacts with a `Notify` toast and a `WallpaperList`

@@ -74,6 +74,12 @@ Notify::Notify(QObject* parent): QObject(parent) {
                     }
                 } else if (evt.hasSettingsChanged()) {
                     Q_EMIT settingsChanged();
+                } else if (evt.hasDisplayConnectionFailed()) {
+                    const auto& f = evt.displayConnectionFailed();
+                    Q_EMIT displayConnectionFailed(f.clientName(),
+                                                   f.clientProtocolVersion(),
+                                                   f.errorCode(),
+                                                   f.reason());
                 }
             },
             Qt::QueuedConnection);

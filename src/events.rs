@@ -75,6 +75,15 @@ pub enum GlobalEvent {
     /// outgoing `SettingsChanged` event so all subscribers see the
     /// same merged truth.
     SettingsChanged,
+    /// External display client failed handshake on the UDS endpoint
+    /// (bad protocol name or unsupported version). UI mirrors this
+    /// through `Notify` and surfaces a toast.
+    DisplayConnectionFailed {
+        client_name: String,
+        client_protocol_version: u32,
+        error_code: u32,
+        reason: String,
+    },
 }
 
 pub struct EventBus {
@@ -128,6 +137,14 @@ impl EventBus {
 
     pub fn subscribe(&self) -> broadcast::Receiver<GlobalEvent> {
         self.bus.subscribe()
+    }
+
+    /// Clone of the broadcast sender for callers that need to publish
+    /// transient (non-phase-marker) events from sites that don't have a
+    /// reference to `AppState` — e.g. the display endpoint, which only
+    /// gets `Router` + a shutdown rx today.
+    pub fn sender(&self) -> broadcast::Sender<GlobalEvent> {
+        self.bus.clone()
     }
 
     pub fn watch_sources_ready(&self) -> watch::Receiver<bool> {

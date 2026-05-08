@@ -48,8 +48,9 @@ mod handshake {
 
         let sock_for_task = sock.clone();
         let router_for_task = Arc::clone(&router);
+        let (events_tx, _) = tokio::sync::broadcast::channel(8);
         let server_task = tokio::spawn(async move {
-            let _ = endpoint::serve(&sock_for_task, router_for_task).await;
+            let _ = endpoint::serve(&sock_for_task, router_for_task, events_tx).await;
         });
 
         assert!(
@@ -148,10 +149,11 @@ mod handshake {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(Arc::clone(&mgr));
         let sock_for_task = sock.clone();
+        let (events_tx, _) = tokio::sync::broadcast::channel(8);
         let server_task = tokio::spawn({
             let router = Arc::clone(&router);
             async move {
-                let _ = endpoint::serve(&sock_for_task, router).await;
+                let _ = endpoint::serve(&sock_for_task, router, events_tx).await;
             }
         });
 
@@ -201,10 +203,11 @@ mod handshake {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(Arc::clone(&mgr));
         let sock_for_task = sock.clone();
+        let (events_tx, _) = tokio::sync::broadcast::channel(8);
         let server_task = tokio::spawn({
             let router = Arc::clone(&router);
             async move {
-                let _ = endpoint::serve(&sock_for_task, router).await;
+                let _ = endpoint::serve(&sock_for_task, router, events_tx).await;
             }
         });
 
@@ -402,8 +405,9 @@ mod sync_fd_fanout {
 
         let sock2 = sock.clone();
         let router2 = Arc::clone(&router);
+        let (events_tx, _) = tokio::sync::broadcast::channel(8);
         let server = tokio::spawn(async move {
-            let _ = endpoint::serve(&sock2, router2).await;
+            let _ = endpoint::serve(&sock2, router2, events_tx).await;
         });
 
         assert!(
@@ -510,8 +514,9 @@ mod sync_fd_single {
 
         let sock_for_task = sock.clone();
         let router_for_task = Arc::clone(&router);
+        let (events_tx, _) = tokio::sync::broadcast::channel(8);
         let server = tokio::spawn(async move {
-            let _ = endpoint::serve(&sock_for_task, router_for_task).await;
+            let _ = endpoint::serve(&sock_for_task, router_for_task, events_tx).await;
         });
 
         assert!(

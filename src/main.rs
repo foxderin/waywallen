@@ -443,10 +443,11 @@ async fn async_main() -> anyhow::Result<()> {
         let router = router.clone();
         let sock_path = display_sock_path.clone();
         let shutdown_rx = state.shutdown_subscribe();
+        let events_tx = state.events.sender();
         state
             .tasks
             .spawn_async(tasks::TaskKind::Service, "display/endpoint", async move {
-                display::endpoint::serve_with_shutdown(&sock_path, router, shutdown_rx)
+                display::endpoint::serve_with_shutdown(&sock_path, router, events_tx, shutdown_rx)
                     .await
                     .map_err(|e| anyhow::anyhow!("display endpoint exited: {e}"))
             });

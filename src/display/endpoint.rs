@@ -11,6 +11,7 @@ use crate::display::proto::generated::Rect;
 use crate::display::proto::{
     codec, error_code, opcode, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
 };
+use crate::events::GlobalEvent;
 // Display-protocol failures are all daemon-internal (this layer talks
 // to consumer processes over a UDS, not to the WS/dbus surface). Every
 // anyhow! site in this file is wrapped as `Error::Internal(anyhow!(...))`
@@ -61,12 +62,16 @@ pub fn default_socket_path() -> PathBuf {
 /// [`serve_with_shutdown`] with a never-firing channel so the fast
 /// path in production (D-Bus `Quit` → kick every blocking `recvmsg`)
 /// goes through the same code.
-pub async fn serve(sock_path: &Path, router: Arc<Router>) -> Result<()> {
+pub async fn serve(
+    sock_path: &Path,
+    router: Arc<Router>,
+    events_tx: tokio::sync::broadcast::Sender<GlobalEvent>,
+) -> Result<()> {
     // Holding `_never_tx` in scope keeps `wait_for` parked on `Pending`
     // — if we dropped it, every subscriber would see `RecvError::Closed`
     // and the shutdown branch would fire immediately.
     let (_never_tx, rx) = tokio::sync::watch::channel(false);
-    let res = serve_with_shutdown(sock_path, router, rx).await;
+    let res = serve_with_shutdown(sock_path, router, events_tx, rx).await;
     drop(_never_tx);
     res
 }
@@ -74,6 +79,7 @@ pub async fn serve(sock_path: &Path, router: Arc<Router>) -> Result<()> {
 pub async fn serve_with_shutdown(
     sock_path: &Path,
     router: Arc<Router>,
+    events_tx: tokio::sync::broadcast::Sender<GlobalEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let _ = std::fs::remove_file(sock_path);
@@ -112,8 +118,11 @@ pub async fn serve_with_shutdown(
         };
         let router = Arc::clone(&router);
         let client_shutdown_rx = shutdown_rx.clone();
+        let client_events_tx = events_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(std_stream, router, client_shutdown_rx).await {
+            if let Err(e) =
+                handle_client(std_stream, router, client_events_tx, client_shutdown_rx).await
+            {
                 log::info!("display client closed: {e}");
             }
         });
@@ -127,10 +136,11 @@ pub async fn serve_with_shutdown(
 async fn handle_client(
     stream: StdUnixStream,
     router: Arc<Router>,
+    events_tx: tokio::sync::broadcast::Sender<GlobalEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     log::info!("display client connected; performing handshake");
-    let registration = do_handshake(&stream, &mut shutdown_rx).await?;
+    let registration = do_handshake(&stream, &events_tx, &mut shutdown_rx).await?;
     let DisplayHandle { id: display_id, rx } = router.register_display(registration).await;
     log::info!("display {display_id} registered with router");
 
@@ -157,6 +167,7 @@ async fn handle_client(
 
 async fn do_handshake(
     stream: &StdUnixStream,
+    events_tx: &tokio::sync::broadcast::Sender<GlobalEvent>,
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<DisplayRegistration> {
     let (hello, _fds): (Request, _) = recv_request_cancellable(stream, shutdown_rx)
@@ -189,6 +200,12 @@ async fn do_handshake(
             )
         })
         .await;
+        let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
+            client_name: client_name.clone(),
+            client_protocol_version,
+            error_code: error_code::PROTO_NAME_MISMATCH,
+            reason: msg.clone(),
+        });
         return Err(Error::Internal(anyhow!("bad protocol string: {msg}")));
     }
     if !(MIN_SUPPORTED_CLIENT_VERSION..=MAX_SUPPORTED_CLIENT_VERSION)
@@ -211,6 +228,12 @@ async fn do_handshake(
             )
         })
         .await;
+        let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
+            client_name: client_name.clone(),
+            client_protocol_version,
+            error_code: error_code::VERSION_UNSUPPORTED,
+            reason: msg.clone(),
+        });
         return Err(Error::Internal(anyhow!("version mismatch: {msg}")));
     }
     log::info!("display hello: {client_name} v{client_version} (proto v{client_protocol_version})");
