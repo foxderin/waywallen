@@ -19,4 +19,5 @@ loop_file = { type = "string", default = "inf", choices = ["inf", "no"], identit
 hwdec = { type = "string", default = "auto", choices = ["auto", "vaapi", "vulkan", "none"], identity = false, label_key = "settings.video.hwdec", group = "decode", order = 20 }
 render_node = { type = "string", default = "", identity = true, label_key = "settings.video.render_node", group = "decode", order = 30 }
 volume = { type = "u32", default = 100, min = 0, max = 100, step = 1, identity = false, label_key = "settings.video.volume", group = "audio", order = 40 }
+enable_audio = { type = "bool", default = true, identity = true, label_key = "settings.video.enable_audio", group = "audio", order = 35 }
 fps = { type = "u32", default = 30, min = 1, max = 240, step = 1, identity = true, label_key = "settings.video.fps", group = "render", order = 50 }
