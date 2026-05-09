@@ -18,6 +18,7 @@ target_link_libraries(waywallen-video-renderer
     PRIVATE
         waywallen::bridge
         wavsen::video
+        wavsen::audio
         rstd::log
         Vulkan::Vulkan
         Threads::Threads

@@ -13,6 +13,8 @@
 import rstd.cppstd;
 import rstd.log;
 import wavsen.video;
+import wavsen.audio.byte_stream;
+import wavsen.audio.av_sync;
 
 #include <rstd/macro.hpp>
 
@@ -105,6 +107,13 @@ struct HostState {
     std::mutex              hwdec_mu;
     std::string             pending_hwdec;
     bool                    hwdec_pending { false };
+
+    /* Audio runtime settings — applied to AvPlayer atomically when
+     * pending flag is set; no decoder rebuild. */
+    std::atomic<uint32_t>   pending_volume       { 100 };
+    std::atomic<bool>       volume_pending       { false };
+    std::atomic<bool>       pending_enable_audio { true };
+    std::atomic<bool>       enable_audio_pending { false };
 };
 
 wavsen::video::HwAccel parse_hwdec(const char* v) {
@@ -171,6 +180,19 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
                 std::lock_guard<std::mutex> lk(host.hwdec_mu);
                 host.pending_hwdec  = val;
                 host.hwdec_pending  = true;
+            } else if (std::strcmp(key, "volume") == 0) {
+                int n = std::atoi(val);
+                if (n < 0)   n = 0;
+                if (n > 100) n = 100;
+                host.pending_volume.store(static_cast<uint32_t>(n),
+                                          std::memory_order_release);
+                host.volume_pending.store(true, std::memory_order_release);
+            } else if (std::strcmp(key, "enable_audio") == 0) {
+                bool v = !(std::strcmp(val, "false") == 0
+                           || std::strcmp(val, "0") == 0
+                           || std::strcmp(val, "no") == 0);
+                host.pending_enable_audio.store(v, std::memory_order_release);
+                host.enable_audio_pending.store(true, std::memory_order_release);
             } else {
                 rstd_warn("waywallen-video-renderer: ApplySettings: unknown key '{}'; ignoring",
                           static_cast<const char*>(key));
@@ -472,6 +494,21 @@ int main(int argc, char** argv) {
     if (const char* v = kv_get(init.settings, "hwdec")) {
         hwaccel = parse_hwdec(v);
     }
+    bool     enable_audio = true;
+    uint32_t volume_pct   = 100;
+    if (const char* v = kv_get(init.settings, "enable_audio")) {
+        enable_audio = !(std::strcmp(v, "false") == 0
+                         || std::strcmp(v, "0") == 0
+                         || std::strcmp(v, "no") == 0);
+    }
+    if (const char* v = kv_get(init.settings, "volume")) {
+        int n = std::atoi(v);
+        if (n < 0)   n = 0;
+        if (n > 100) n = 100;
+        volume_pct = static_cast<uint32_t>(n);
+    }
+    host.pending_volume.store(volume_pct, std::memory_order_release);
+    host.pending_enable_audio.store(enable_audio, std::memory_order_release);
     ww_bridge_init_free(&init);
     if (opt.video_path.empty())
         die("--path <video-file> is required");
@@ -525,6 +562,32 @@ int main(int argc, char** argv) {
     host.loop_value.store(opt.loop_file, std::memory_order_release);
     rstd_info("waywallen-video-renderer: hwdec={}, decoder kind={}",
               hwdec_label(hwaccel), kind_label(decoder->kind()));
+
+    /* --- Audio: open same file via PosixFile, attach AvPlayer.
+     *   Failure (missing audio stream, unsupported codec, no cubeb device)
+     *   is non-fatal: log and continue without audio (presenter falls
+     *   back to wall-clock pacing). */
+    std::unique_ptr<wavsen::audio::AvPlayer> av_player;
+    if (enable_audio) {
+        auto file_res = wavsen::audio::PosixFile::open(opt.video_path);
+        if (file_res.is_err()) {
+            rstd_warn("waywallen-video-renderer: audio file open failed");
+        } else {
+            std::shared_ptr<wavsen::audio::IByteStream> src =
+                std::move(file_res).unwrap();
+            auto p_res = wavsen::audio::AvPlayer::open(std::move(src));
+            if (p_res.is_err()) {
+                rstd_warn("waywallen-video-renderer: audio open failed: {}",
+                          std::move(p_res).unwrap_err().message);
+            } else {
+                av_player = std::move(p_res).unwrap();
+                av_player->set_volume(volume_pct / 100.0f);
+                av_player->play();
+                rstd_info("waywallen-video-renderer: audio attached "
+                          "(volume={}%)", volume_pct);
+            }
+        }
+    }
 
     ww_bridge_vk_dt_t vdt {};
     ww_bridge_vk_dt_load(&vdt, vkGetInstanceProcAddr, producer->instance());
@@ -618,9 +681,14 @@ int main(int argc, char** argv) {
     /* --- Main loop ----------------------------------------------------- */
     uint32_t  slot = 0;
     wavsen::video::Presenter presenter;  // Iter 3: PTS-driven pacing.
+    if (av_player) {
+        presenter.set_external_clock(
+            [p = av_player.get()] { return p->current_time_seconds(); });
+    }
     wavsen::video::Nv12Frame frame;
     wavsen::video::VkFrameView vkv {};
     wavsen::video::DrmFrameView drmv {};
+    double prev_pts = -1.0;  // for loop-boundary detection (PTS regression)
 
     while (!host.shutdown.load(std::memory_order_acquire)) {
         {
@@ -642,6 +710,16 @@ int main(int argc, char** argv) {
             decoder->set_loop(host.loop_value.load(std::memory_order_acquire));
             // Loop toggled — let the presenter re-baseline on next frame.
             presenter.reset();
+        }
+
+        /* Audio settings — applied to AvPlayer atomically without rebuild. */
+        if (av_player && host.volume_pending.exchange(false, std::memory_order_acq_rel)) {
+            const auto v = host.pending_volume.load(std::memory_order_acquire);
+            av_player->set_volume(static_cast<float>(v) / 100.0f);
+        }
+        if (av_player && host.enable_audio_pending.exchange(false, std::memory_order_acq_rel)) {
+            const bool en = host.pending_enable_audio.load(std::memory_order_acquire);
+            av_player->set_muted(!en);
         }
 
         /* hwdec change requested — apply at this loop boundary by
@@ -678,6 +756,9 @@ int main(int argc, char** argv) {
                     decoder = std::move(re_res).unwrap();
                     hwaccel = new_h;
                     presenter.reset();
+                    // Video reopened at PTS 0 — keep audio aligned.
+                    if (av_player) av_player->seek_to_start();
+                    prev_pts = -1.0;
                     rstd_info("waywallen-video-renderer: reopened, kind={}",
                               kind_label(decoder->kind()));
                 }
@@ -729,6 +810,15 @@ int main(int argc, char** argv) {
         case wavsen::video::FrameKind::VaapiDrm:     frame_pts = drmv.pts_seconds; break;
         case wavsen::video::FrameKind::Sw:           frame_pts = frame.pts_seconds; break;
         }
+
+        /* Loop boundary: decoder seeks itself to 0 when loop=on, so we
+         * detect it by PTS regression and re-anchor audio + presenter. */
+        if (frame_pts >= 0.0 && prev_pts >= 0.0
+            && frame_pts + 0.5 < prev_pts) {
+            if (av_player) av_player->seek_to_start();
+            presenter.reset();
+        }
+        prev_pts = frame_pts;
 
         // PTS pacing: sleep until this frame is due. Drop if too late.
         if (!presenter.present_frame(frame_pts)) continue;
