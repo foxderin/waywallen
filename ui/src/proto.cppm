@@ -98,4 +98,7 @@ using proto::TypeConditionGadget::TypeCondition;
 using proto::LogicOpGadget::LogicOp;
 using proto::FilterLogic;
 using proto::WallpaperAspectGadget::WallpaperAspect;
+using proto::WallpaperSortRule;
+using proto::WallpaperSortKeyGadget::WallpaperSortKey;
+using proto::SortDirectionGadget::SortDirection;
 } // namespace waywallen::control::v1

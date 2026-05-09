@@ -85,3 +85,23 @@ message WallpaperFilterRule {
     WallpaperAspectFilter aspect_filter = 103;
   }
 }
+
+enum WallpaperSortKey {
+  WALLPAPER_SORT_KEY_UNSPECIFIED = 0;
+  WALLPAPER_SORT_KEY_NAME = 1;
+  WALLPAPER_SORT_KEY_WP_TYPE = 2;
+  WALLPAPER_SORT_KEY_SIZE = 3;
+}
+
+enum SortDirection {
+  SORT_DIRECTION_UNSPECIFIED = 0;
+  SORT_DIRECTION_ASC = 1;
+  SORT_DIRECTION_DESC = 2;
+}
+
+// Multiple rules form a stable composite sort, applied in the order
+// given (rule[0] is the primary key).
+message WallpaperSortRule {
+  WallpaperSortKey key = 1;
+  SortDirection direction = 2;
+}

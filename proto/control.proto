@@ -299,6 +299,7 @@ message WallpaperListRequest {
   reserved 4;
   repeated WallpaperFilterRule filters = 5;
   repeated FilterLogic filter_logics = 6;
+  repeated WallpaperSortRule sorts = 7;
 }
 message WallpaperListResponse {
   repeated WallpaperEntry wallpapers = 1;

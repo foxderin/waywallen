@@ -812,7 +812,7 @@ async fn dispatch_inner(
                 )
             };
 
-            let filtered_entries: Vec<&crate::wallpaper_type::WallpaperEntry> =
+            let mut filtered_entries: Vec<&crate::wallpaper_type::WallpaperEntry> =
                 if let Some(matched_keys) = matched_keys.as_ref() {
                     raw_entries
                         .into_iter()
@@ -825,6 +825,8 @@ async fn dispatch_inner(
                 } else {
                     raw_entries
                 };
+
+            apply_wallpaper_sorts(&mut filtered_entries, &r.sorts, &db_meta_map);
 
             let total = filtered_entries.len() as u32;
             let page_size = r.page_size as usize;
@@ -1512,6 +1514,47 @@ fn entry_to_pb(
         width,
         height,
         format,
+    }
+}
+
+// Apply composite sort rules in-place. Rules are applied in reverse so
+// the first rule ends up as the primary key (sort_by is stable).
+fn apply_wallpaper_sorts(
+    entries: &mut [&crate::wallpaper_type::WallpaperEntry],
+    sorts: &[pb::WallpaperSortRule],
+    db_meta_map: &std::collections::HashMap<
+        (String, String),
+        crate::model::entities::item::Model,
+    >,
+) {
+    use std::cmp::Ordering;
+
+    let lookup = |e: &crate::wallpaper_type::WallpaperEntry| {
+        crate::model::sync::relative_under_root(&e.library_root, &e.resource)
+            .and_then(|rel| db_meta_map.get(&(e.library_root.clone(), rel)))
+    };
+
+    for rule in sorts.iter().rev() {
+        let key = match pb::WallpaperSortKey::try_from(rule.key) {
+            Ok(k) if k != pb::WallpaperSortKey::Unspecified => k,
+            _ => continue,
+        };
+        let desc = pb::SortDirection::try_from(rule.direction)
+            == Ok(pb::SortDirection::Desc);
+
+        entries.sort_by(|a, b| {
+            let ord = match key {
+                pb::WallpaperSortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                pb::WallpaperSortKey::WpType => a.wp_type.cmp(&b.wp_type),
+                pb::WallpaperSortKey::Size => {
+                    let sa = lookup(a).and_then(|m| m.size).or(a.size).unwrap_or(0);
+                    let sb = lookup(b).and_then(|m| m.size).or(b.size).unwrap_or(0);
+                    sa.cmp(&sb)
+                }
+                pb::WallpaperSortKey::Unspecified => Ordering::Equal,
+            };
+            if desc { ord.reverse() } else { ord }
+        });
     }
 }
 
