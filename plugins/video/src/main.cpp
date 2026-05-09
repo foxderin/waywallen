@@ -705,7 +705,8 @@ int main(int argc, char** argv) {
     wavsen::video::Nv12Frame frame;
     wavsen::video::VkFrameView vkv {};
     wavsen::video::DrmFrameView drmv {};
-    double prev_pts = -1.0;  // for loop-boundary detection (PTS regression)
+    double   prev_pts = -1.0;       // for loop-boundary detection (PTS regression)
+    uint32_t stall_warn_counter = 0; // throttle ETIME log spam during backpressure
 
     while (!host.shutdown.load(std::memory_order_acquire)) {
         {
@@ -840,10 +841,31 @@ int main(int argc, char** argv) {
         // PTS pacing: sleep until this frame is due. Drop if too late.
         if (!presenter.present_frame(frame_pts)) continue;
 
-        if (int rc = ww_bridge_pool_wait_slot_release(host.pool, slot, 250);
-            rc != 0 && rc != -ETIME) {
-            rstd_warn("waywallen-video-renderer: wait_slot_release({}) rc={}",
-                      slot, rc);
+        /* Wait timeout (600 ms) intentionally exceeds the daemon reaper's
+         * BUCKET_TIMEOUT (500 ms — see src/sync/reaper.rs); the reaper
+         * force-signals stragglers in that window, so a true -ETIME here
+         * means the safety-net itself didn't fire — backpressure is
+         * persistent, not transient. In that case drop this frame
+         * instead of racing past the consumer (writing into a slot the
+         * display still owns desyncs the pipeline and snowballs into
+         * post-resize stutter). Don't advance `slot` so we retry the
+         * same slot once it actually releases. */
+        {
+            int rc = ww_bridge_pool_wait_slot_release(host.pool, slot, 600);
+            if (rc == -ETIME) {
+                if ((stall_warn_counter++ % 30) == 0) {
+                    rstd_warn("waywallen-video-renderer: slot {} stalled (ETIME), dropping frame",
+                              slot);
+                }
+                continue;
+            }
+            if (rc != 0) {
+                rstd_warn("waywallen-video-renderer: wait_slot_release({}) rc={}",
+                          slot, rc);
+                // Hard error (not timeout) — proceed anyway, same as before.
+            } else {
+                stall_warn_counter = 0;
+            }
         }
 
         ww_pool_slot_t s {};
