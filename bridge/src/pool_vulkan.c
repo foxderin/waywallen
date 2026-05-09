@@ -14,6 +14,7 @@
 #include <waywallen-bridge/probe_vk.h>
 #include <waywallen-bridge/drm_fourcc.h>
 
+#include "log_internal.h"
 #include "pool_internal.h"
 #include "sync_release.h"
 
@@ -22,7 +23,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -198,10 +198,10 @@ static int probe_caps(ww_pool_t *pool, uint32_t width, uint32_t height) {
     }
 
     if (entries_count == 0) {
-        fprintf(stderr,
-                "ww_pool[vulkan]: no (fourcc, modifier) pairs satisfy producer "
-                "format_features=0x%x — falling back to single LINEAR ABGR8888\n",
-                st->format_features);
+        ww_bridge_logf(WW_BRIDGE_LOG_WARN,
+                       "ww_pool[vulkan]: no (fourcc, modifier) pairs satisfy producer "
+                       "format_features=0x%x — falling back to single LINEAR ABGR8888",
+                       st->format_features);
         free(entries);
         ww_format_entry_t *ent = (ww_format_entry_t *)calloc(1, sizeof(*ent));
         if (!ent) return -ENOMEM;
@@ -320,9 +320,9 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
 
     VkFormat vk_format = fourcc_to_vk_format(d->fourcc);
     if (vk_format == VK_FORMAT_UNDEFINED) {
-        fprintf(stderr,
-                "ww_pool[vulkan]: directive fourcc 0x%08x has no VkFormat mapping\n",
-                d->fourcc);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: directive fourcc 0x%08x has no VkFormat mapping",
+                       d->fourcc);
         return -EINVAL;
     }
 
@@ -356,9 +356,9 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     VkImage image = VK_NULL_HANDLE;
     VkResult r = st->vkCreateImage(st->device, &img_ci, NULL, &image);
     if (r != VK_SUCCESS) {
-        fprintf(stderr,
-                "ww_pool[vulkan]: vkCreateImage failed (modifier=0x%016llx linear=%d): %d\n",
-                (unsigned long long)modifiers[0], linear_path ? 1 : 0, r);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: vkCreateImage failed (modifier=0x%016llx linear=%d): %d",
+                       (unsigned long long)modifiers[0], linear_path ? 1 : 0, r);
         return -EIO;
     }
 
@@ -372,10 +372,10 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     uint32_t mem_type = pick_memory_type(
         st, mr.memoryRequirements.memoryTypeBits, linear_path);
     if (mem_type == UINT32_MAX) {
-        fprintf(stderr,
-                "ww_pool[vulkan]: no memory type matches image typeBits=0x%x "
-                "(linear_path=%d)\n",
-                mr.memoryRequirements.memoryTypeBits, (int)linear_path);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: no memory type matches image typeBits=0x%x "
+                       "(linear_path=%d)",
+                       mr.memoryRequirements.memoryTypeBits, (int)linear_path);
         st->vkDestroyImage(st->device, image, NULL);
         return -EIO;
     }
@@ -388,12 +388,12 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
              * non-HOST_VISIBLE type. The cross-vendor consumer is very
              * likely to fail to import this dma-buf for GPU use. Warn
              * loudly so the operator sees it before the consumer dies. */
-            fprintf(stderr,
-                    "ww_pool[vulkan]: COMPAT_LINEAR slot fell back to "
-                    "non-HOST_VISIBLE memtype %u (flags=0x%x); cross-vendor "
-                    "consumers may fail. typeBits=0x%x\n",
-                    mem_type, (unsigned)pf,
-                    mr.memoryRequirements.memoryTypeBits);
+            ww_bridge_logf(WW_BRIDGE_LOG_WARN,
+                           "ww_pool[vulkan]: COMPAT_LINEAR slot fell back to "
+                           "non-HOST_VISIBLE memtype %u (flags=0x%x); cross-vendor "
+                           "consumers may fail. typeBits=0x%x",
+                           mem_type, (unsigned)pf,
+                           mr.memoryRequirements.memoryTypeBits);
         }
     }
 
@@ -415,13 +415,15 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     VkDeviceMemory memory = VK_NULL_HANDLE;
     r = st->vkAllocateMemory(st->device, &mai, NULL, &memory);
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "ww_pool[vulkan]: vkAllocateMemory failed: %d\n", r);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: vkAllocateMemory failed: %d", r);
         st->vkDestroyImage(st->device, image, NULL);
         return -ENOMEM;
     }
     r = st->vkBindImageMemory(st->device, image, memory, 0);
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "ww_pool[vulkan]: vkBindImageMemory failed: %d\n", r);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: vkBindImageMemory failed: %d", r);
         st->vkFreeMemory(st->device, memory, NULL);
         st->vkDestroyImage(st->device, image, NULL);
         return -EIO;
@@ -434,7 +436,8 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     int fd = -1;
     r = st->vkGetMemoryFdKHR(st->device, &fdi, &fd);
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "ww_pool[vulkan]: vkGetMemoryFdKHR failed: %d\n", r);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: vkGetMemoryFdKHR failed: %d", r);
         st->vkFreeMemory(st->device, memory, NULL);
         st->vkDestroyImage(st->device, image, NULL);
         return -EIO;
@@ -450,10 +453,10 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     uint32_t plane_count = linear_path ? 1u : d->plane_count;
     if (plane_count == 0) plane_count = 1;
     if (plane_count > WW_POOL_MAX_PLANES) {
-        fprintf(stderr,
-                "ww_pool[vulkan]: alloc_slot[%u]: directive plane_count=%u "
-                "exceeds WW_POOL_MAX_PLANES=%d\n",
-                slot_index, plane_count, WW_POOL_MAX_PLANES);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: alloc_slot[%u]: directive plane_count=%u "
+                       "exceeds WW_POOL_MAX_PLANES=%d",
+                       slot_index, plane_count, WW_POOL_MAX_PLANES);
         close(fd);
         st->vkFreeMemory(st->device, memory, NULL);
         st->vkDestroyImage(st->device, image, NULL);
@@ -479,17 +482,17 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
         plane_sizes[p]   = (uint64_t)pl.size;
     }
 
-    fprintf(stderr,
-            "ww_pool[vulkan]: alloc_slot[%u] %ux%u fourcc=0x%08x "
-            "mod=0x%016llx linear=%d planes=%u mem_size=%llu\n",
-            slot_index, d->width, d->height, d->fourcc,
-            (unsigned long long)mod_props.drmFormatModifier, linear_path ? 1 : 0,
-            plane_count, (unsigned long long)mr.memoryRequirements.size);
+    ww_bridge_logf(WW_BRIDGE_LOG_DEBUG,
+                   "ww_pool[vulkan]: alloc_slot[%u] %ux%u fourcc=0x%08x "
+                   "mod=0x%016llx linear=%d planes=%u mem_size=%llu",
+                   slot_index, d->width, d->height, d->fourcc,
+                   (unsigned long long)mod_props.drmFormatModifier, linear_path ? 1 : 0,
+                   plane_count, (unsigned long long)mr.memoryRequirements.size);
     for (uint32_t p = 0; p < plane_count; ++p) {
-        fprintf(stderr,
-                "  plane[%u] stride=%u offset=%u size=%llu\n",
-                p, plane_strides[p], plane_offsets[p],
-                (unsigned long long)plane_sizes[p]);
+        ww_bridge_logf(WW_BRIDGE_LOG_DEBUG,
+                       "ww_pool[vulkan]:   plane[%u] stride=%u offset=%u size=%llu",
+                       p, plane_strides[p], plane_offsets[p],
+                       (unsigned long long)plane_sizes[p]);
     }
 
     /* Vulkan's non-disjoint dmabuf-import gives a single VkDeviceMemory
@@ -503,9 +506,9 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     for (uint32_t p = 1; p < plane_count; ++p) {
         plane_fds[p] = fcntl(fd, F_DUPFD_CLOEXEC, 3);
         if (plane_fds[p] < 0) {
-            fprintf(stderr,
-                    "ww_pool[vulkan]: F_DUPFD_CLOEXEC for plane %u failed: %s\n",
-                    p, strerror(errno));
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool[vulkan]: F_DUPFD_CLOEXEC for plane %u failed: %s",
+                           p, strerror(errno));
             for (uint32_t q = 0; q < p; ++q) close(plane_fds[q]);
             st->vkFreeMemory(st->device, memory, NULL);
             st->vkDestroyImage(st->device, image, NULL);
@@ -601,8 +604,8 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
 
     int rc = load_dispatch(st, cvt.as_fn);
     if (rc != 0) {
-        fprintf(stderr,
-                "ww_pool[vulkan]: failed to resolve required Vulkan entry points\n");
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[vulkan]: failed to resolve required Vulkan entry points");
         free(st);
         return rc;
     }
@@ -637,8 +640,9 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
         /* dup so we don't double-close. */
         int dup_fd = dup(init->drm_render_fd);
         if (dup_fd < 0) {
-            fprintf(stderr, "ww_pool[vulkan]: dup(drm_render_fd) failed: %s\n",
-                    strerror(errno));
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool[vulkan]: dup(drm_render_fd) failed: %s",
+                           strerror(errno));
             free(st);
             pool->backend_data = NULL;
             return -errno;
@@ -653,20 +657,20 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
          * here so the producer is forced to either share its fd or
          * call ww_bridge_vk_query_render_node before pool_create. */
         if (init->drm_render_minor == 0) {
-            fprintf(stderr,
-                    "ww_pool[vulkan]: drm_render_fd=-1 and drm_render_minor=0 "
-                    "— producer must populate drm_render_minor (use "
-                    "ww_bridge_vk_query_render_node from probe_vk.h) or share "
-                    "an already-opened drm_render_fd\n");
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool[vulkan]: drm_render_fd=-1 and drm_render_minor=0 "
+                           "— producer must populate drm_render_minor (use "
+                           "ww_bridge_vk_query_render_node from probe_vk.h) or share "
+                           "an already-opened drm_render_fd");
             free(st);
             pool->backend_data = NULL;
             return -EINVAL;
         }
         int fd = ww_drm_open_render_node_by_minor(init->drm_render_minor);
         if (fd < 0) {
-            fprintf(stderr,
-                    "ww_pool[vulkan]: open(/dev/dri/renderD%u) failed: %d\n",
-                    init->drm_render_minor, fd);
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool[vulkan]: open(/dev/dri/renderD%u) failed: %d",
+                           init->drm_render_minor, fd);
             free(st);
             pool->backend_data = NULL;
             return fd;

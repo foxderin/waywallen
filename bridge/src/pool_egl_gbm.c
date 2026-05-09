@@ -21,6 +21,7 @@
 #include <waywallen-bridge/pool.h>
 #include <waywallen-bridge/drm_fourcc.h>
 
+#include "log_internal.h"
 #include "pool_internal.h"
 
 #include <EGL/egl.h>
@@ -29,7 +30,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -245,9 +245,9 @@ static int probe_caps(ww_pool_t *pool, uint32_t width, uint32_t height) {
         entries[0].modifier    = DRM_FORMAT_MOD_LINEAR;
         entries[0].plane_count = 1;
         n = 1;
-        fprintf(stderr,
-                "ww_pool[egl_gbm]: modifier-aware probe yielded 0 entries — "
-                "advertising single LINEAR fallback\n");
+        ww_bridge_logf(WW_BRIDGE_LOG_WARN,
+                       "ww_pool[egl_gbm]: modifier-aware probe yielded 0 entries — "
+                       "advertising single LINEAR fallback");
     }
 
     pool->caps.entries = entries;
@@ -342,9 +342,9 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
         bo = gbm_bo_create(st->gbm, d->width, d->height, d->fourcc,
                            GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
         if (!bo) {
-            fprintf(stderr,
-                    "ww_pool[egl_gbm]: gbm_bo_create(USE_LINEAR) failed for "
-                    "fourcc=0x%08x %ux%u\n", d->fourcc, d->width, d->height);
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool[egl_gbm]: gbm_bo_create(USE_LINEAR) failed for "
+                           "fourcc=0x%08x %ux%u", d->fourcc, d->width, d->height);
             return -EIO;
         }
     } else {
@@ -353,11 +353,11 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
             st->gbm, d->width, d->height, d->fourcc,
             mods, 1, GBM_BO_USE_RENDERING);
         if (!bo) {
-            fprintf(stderr,
-                    "ww_pool[egl_gbm]: gbm_bo_create_with_modifiers2 failed for "
-                    "fourcc=0x%08x mod=0x%016llx %ux%u\n",
-                    d->fourcc, (unsigned long long)d->modifier,
-                    d->width, d->height);
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool[egl_gbm]: gbm_bo_create_with_modifiers2 failed for "
+                           "fourcc=0x%08x mod=0x%016llx %ux%u",
+                           d->fourcc, (unsigned long long)d->modifier,
+                           d->width, d->height);
             return -EIO;
         }
     }
@@ -365,10 +365,10 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     int      gbm_planes = gbm_bo_get_plane_count(bo);
     if (gbm_planes <= 0) gbm_planes = 1;
     if (gbm_planes > WW_POOL_MAX_PLANES) {
-        fprintf(stderr,
-                "ww_pool[egl_gbm]: alloc_slot[%u]: gbm reports %d planes, "
-                "exceeds WW_POOL_MAX_PLANES=%d\n",
-                slot_index, gbm_planes, WW_POOL_MAX_PLANES);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[egl_gbm]: alloc_slot[%u]: gbm reports %d planes, "
+                       "exceeds WW_POOL_MAX_PLANES=%d",
+                       slot_index, gbm_planes, WW_POOL_MAX_PLANES);
         gbm_bo_destroy(bo);
         return -ENOSPC;
     }
@@ -405,16 +405,16 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
         }
     }
 
-    fprintf(stderr,
-            "ww_pool[egl_gbm]: alloc_slot[%u] %ux%u fourcc=0x%08x "
-            "mod=0x%016llx linear=%d gbm_planes=%d\n",
-            slot_index, d->width, d->height, d->fourcc,
-            (unsigned long long)actual_mod, linear_path ? 1 : 0, gbm_planes);
+    ww_bridge_logf(WW_BRIDGE_LOG_DEBUG,
+                   "ww_pool[egl_gbm]: alloc_slot[%u] %ux%u fourcc=0x%08x "
+                   "mod=0x%016llx linear=%d gbm_planes=%d",
+                   slot_index, d->width, d->height, d->fourcc,
+                   (unsigned long long)actual_mod, linear_path ? 1 : 0, gbm_planes);
     for (int p = 0; p < gbm_planes; ++p) {
-        fprintf(stderr,
-                "  plane[%d] fd=%d stride=%u offset=%u size=%llu\n",
-                p, plane_fds[p], plane_strides[p], plane_offsets[p],
-                (unsigned long long)plane_sizes[p]);
+        ww_bridge_logf(WW_BRIDGE_LOG_DEBUG,
+                       "ww_pool[egl_gbm]:   plane[%d] fd=%d stride=%u offset=%u size=%llu",
+                       p, plane_fds[p], plane_strides[p], plane_offsets[p],
+                       (unsigned long long)plane_sizes[p]);
     }
 
     /* EGLImage import. LINEAR path imports without modifier attrs to
@@ -430,12 +430,12 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
                                plane_fds, plane_strides, plane_offsets,
                                (uint32_t)gbm_planes, actual_mod);
     if (img == EGL_NO_IMAGE_KHR) {
-        fprintf(stderr,
-                "ww_pool[egl_gbm]: eglCreateImageKHR failed (egl_err=0x%04x) "
-                "fourcc=0x%08x mod=0x%016llx linear=%d planes=%d\n",
-                st->edt.eglGetError(), d->fourcc,
-                (unsigned long long)actual_mod, linear_path ? 1 : 0,
-                gbm_planes);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[egl_gbm]: eglCreateImageKHR failed (egl_err=0x%04x) "
+                       "fourcc=0x%08x mod=0x%016llx linear=%d planes=%d",
+                       st->edt.eglGetError(), d->fourcc,
+                       (unsigned long long)actual_mod, linear_path ? 1 : 0,
+                       gbm_planes);
         for (int p = 0; p < gbm_planes; ++p) close(plane_fds[p]);
         gbm_bo_destroy(bo);
         return -EIO;
@@ -460,11 +460,11 @@ static int alloc_slot(ww_pool_t *pool, uint32_t slot_index,
     unsigned int fbo_status = st->glCheckFramebufferStatus(WW_GL_FRAMEBUFFER);
     st->glBindFramebuffer(WW_GL_FRAMEBUFFER, 0);
     if (fbo_status != WW_GL_FRAMEBUFFER_COMPLETE) {
-        fprintf(stderr,
-                "ww_pool[egl_gbm]: slot[%u] FBO incomplete: status=0x%04x "
-                "gl_err=0x%04x mod=0x%016llx fourcc=0x%08x linear=%d\n",
-                slot_index, fbo_status, gl_err,
-                (unsigned long long)actual_mod, d->fourcc, linear_path ? 1 : 0);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[egl_gbm]: slot[%u] FBO incomplete: status=0x%04x "
+                       "gl_err=0x%04x mod=0x%016llx fourcc=0x%08x linear=%d",
+                       slot_index, fbo_status, gl_err,
+                       (unsigned long long)actual_mod, d->fourcc, linear_path ? 1 : 0);
         st->glDeleteFramebuffers(1, &fbo);
         st->glDeleteTextures(1, &tex);
         st->edt.eglDestroyImageKHR(st->display, img);
@@ -577,15 +577,16 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
     } cvt;
     cvt.as_obj = init->get_proc_address;
     if (load_gl_dispatch(st, cvt.as_fn) != 0) {
-        fprintf(stderr,
-                "ww_pool[egl_gbm]: failed to resolve required EGL/GL entry points\n");
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[egl_gbm]: failed to resolve required EGL/GL entry points");
         free(st);
         return -ENOSYS;
     }
 
     st->gbm = gbm_create_device(init->drm_render_fd);
     if (!st->gbm) {
-        fprintf(stderr, "ww_pool[egl_gbm]: gbm_create_device failed\n");
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool[egl_gbm]: gbm_create_device failed");
         free(st);
         return -EIO;
     }

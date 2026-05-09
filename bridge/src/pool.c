@@ -16,11 +16,11 @@
 #include <waywallen-bridge/bridge.h>
 #include <waywallen-bridge/pool.h>
 
+#include "log_internal.h"
 #include "pool_internal.h"
 #include "sync_release.h"
 
 #include <errno.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -83,15 +83,15 @@ static int send_release_syncobj_once(ww_pool_t *p, int sock) {
     int fd = -1;
     int rc = ww_drm_syncobj_export_fd(p->drm_fd, p->release_syncobj_handle, &fd);
     if (rc != 0) {
-        fprintf(stderr,
-                "ww_pool: HANDLE_TO_FD on release_syncobj failed: %d\n", rc);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool: HANDLE_TO_FD on release_syncobj failed: %d", rc);
         return rc;
     }
     rc = ww_bridge_send_release_syncobj(sock, fd);
     close(fd);
     if (rc != 0) {
-        fprintf(stderr,
-                "ww_pool: send release_syncobj failed: %d\n", rc);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool: send release_syncobj failed: %d", rc);
         return rc;
     }
     p->release_syncobj_sent = true;
@@ -112,10 +112,10 @@ static int emit_bind_buffers(ww_pool_t *p, int sock) {
     }
     for (uint32_t i = 1; i < p->n_slots; ++i) {
         if (p->slots[i].plane_count != planes_per_buffer) {
-            fprintf(stderr,
-                    "ww_pool: emit_bind_buffers: slot[%u].plane_count=%u "
-                    "differs from slot[0].plane_count=%u — backend bug\n",
-                    i, p->slots[i].plane_count, planes_per_buffer);
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool: emit_bind_buffers: slot[%u].plane_count=%u "
+                           "differs from slot[0].plane_count=%u — backend bug",
+                           i, p->slots[i].plane_count, planes_per_buffer);
             return -EINVAL;
         }
     }
@@ -162,19 +162,19 @@ static int emit_bind_buffers(ww_pool_t *p, int sock) {
     bb.size.count         = total;
     bb.size.data          = sizes;
 
-    fprintf(stderr,
-            "ww_pool: emit_bind_buffers gen=%llu count=%u planes=%u fourcc=0x%08x "
-            "%ux%u mod=0x%016llx flags=0x%x\n",
-            (unsigned long long)bb.generation, bb.count, planes_per_buffer,
-            bb.fourcc, bb.width, bb.height,
-            (unsigned long long)bb.modifier, bb.flags);
+    ww_bridge_logf(WW_BRIDGE_LOG_DEBUG,
+                   "ww_pool: emit_bind_buffers gen=%llu count=%u planes=%u fourcc=0x%08x "
+                   "%ux%u mod=0x%016llx flags=0x%x",
+                   (unsigned long long)bb.generation, bb.count, planes_per_buffer,
+                   bb.fourcc, bb.width, bb.height,
+                   (unsigned long long)bb.modifier, bb.flags);
     for (uint32_t s = 0; s < p->n_slots; ++s) {
         for (uint32_t pl = 0; pl < planes_per_buffer; ++pl) {
             uint32_t flat = s * planes_per_buffer + pl;
-            fprintf(stderr,
-                    "  buf[%u].plane[%u] fd=%d stride=%u offset=%u size=%llu\n",
-                    s, pl, fds[flat], strides[flat], offsets[flat],
-                    (unsigned long long)sizes[flat]);
+            ww_bridge_logf(WW_BRIDGE_LOG_DEBUG,
+                           "ww_pool:   buf[%u].plane[%u] fd=%d stride=%u offset=%u size=%llu",
+                           s, pl, fds[flat], strides[flat], offsets[flat],
+                           (unsigned long long)sizes[flat]);
         }
     }
 
@@ -243,7 +243,8 @@ static void send_bind_failed_quiet(ww_pool_t *p, int sock,
                                    uint32_t reason, const char *msg) {
     int rc = ww_bridge_send_bind_failed(sock, fourcc, modifier, reason, msg);
     if (rc != 0) {
-        fprintf(stderr, "ww_pool: send bind_failed failed: %d\n", rc);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool: send bind_failed failed: %d", rc);
     }
     (void)p;
 }
@@ -417,11 +418,11 @@ int ww_bridge_pool_apply_directive(ww_pool_t                 *pool,
     /* Dry-run: try slot 0 first. */
     rc = pool->ops->alloc_slot(pool, 0, &pool->slots[0]);
     if (rc != 0) {
-        fprintf(stderr,
-                "ww_pool: dry-run alloc_slot[0] failed (path=%u mem_src=%u "
-                "modifier=0x%016llx): %d\n",
-                directive->category, directive->mem_source,
-                (unsigned long long)directive->modifier, rc);
+        ww_bridge_logf(WW_BRIDGE_LOG_WARN,
+                       "ww_pool: dry-run alloc_slot[0] failed (path=%u mem_src=%u "
+                       "modifier=0x%016llx): %d",
+                       directive->category, directive->mem_source,
+                       (unsigned long long)directive->modifier, rc);
         send_bind_failed_quiet(pool, sock, directive->fourcc, directive->modifier,
                                0 /* import_failed */,
                                "alloc_slot dry-run failed");
@@ -435,8 +436,8 @@ int ww_bridge_pool_apply_directive(ww_pool_t                 *pool,
     for (uint32_t i = 1; i < directive->count; ++i) {
         rc = pool->ops->alloc_slot(pool, i, &pool->slots[i]);
         if (rc != 0) {
-            fprintf(stderr,
-                    "ww_pool: alloc_slot[%u] failed: %d\n", i, rc);
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool: alloc_slot[%u] failed: %d", i, rc);
             send_bind_failed_quiet(pool, sock,
                                    directive->fourcc, directive->modifier,
                                    1 /* oom */,
@@ -450,7 +451,8 @@ int ww_bridge_pool_apply_directive(ww_pool_t                 *pool,
     /* All slots allocated — emit bind_buffers. */
     rc = emit_bind_buffers(pool, sock);
     if (rc != 0) {
-        fprintf(stderr, "ww_pool: emit bind_buffers failed: %d\n", rc);
+        ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                       "ww_pool: emit bind_buffers failed: %d", rc);
         return rc;
     }
     return 0;

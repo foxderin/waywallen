@@ -46,6 +46,32 @@ void ww_bridge_close(int sock);
 
 
 /* -----------------------------------------------------------------------
+ * Logging
+ *
+ * The bridge logs internal events (slot allocation failures, bind
+ * errors, the per-directive bind_buffers diagnostic, …) to stderr by
+ * default. Renderers using rstd::log (or any other logging framework)
+ * install a callback to redirect them — same pattern as
+ * waywallen_display_set_log_callback.
+ * ----------------------------------------------------------------------- */
+
+typedef enum ww_bridge_log_level {
+    WW_BRIDGE_LOG_DEBUG = 0,
+    WW_BRIDGE_LOG_INFO  = 1,
+    WW_BRIDGE_LOG_WARN  = 2,
+    WW_BRIDGE_LOG_ERROR = 3,
+} ww_bridge_log_level_t;
+
+typedef void (*ww_bridge_log_callback_t)(ww_bridge_log_level_t level,
+                                         const char *msg,
+                                         void *user_data);
+
+/* Install a global log callback. Pass NULL to fall back to stderr.
+ * Not thread-safe with concurrent log emission — call once at startup. */
+void ww_bridge_set_log_callback(ww_bridge_log_callback_t cb, void *user_data);
+
+
+/* -----------------------------------------------------------------------
  * Low-level framing
  * ----------------------------------------------------------------------- */
 

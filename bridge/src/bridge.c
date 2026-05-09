@@ -14,7 +14,10 @@
 
 #include <waywallen-bridge/bridge.h>
 
+#include "log_internal.h"
+
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +35,36 @@
 
 /* Max inline body: u16 total length minus 4-byte header. */
 #define WW_BRIDGE_MAX_BODY (65535 - 4)
+
+/* -----------------------------------------------------------------------
+ * Logging
+ * ----------------------------------------------------------------------- */
+
+static ww_bridge_log_callback_t s_log_cb = NULL;
+static void *s_log_ud = NULL;
+
+void ww_bridge_set_log_callback(ww_bridge_log_callback_t cb, void *user_data) {
+    s_log_cb = cb;
+    s_log_ud = user_data;
+}
+
+__attribute__((format(printf, 2, 3), visibility("hidden")))
+void ww_bridge_logf(ww_bridge_log_level_t level, const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    (void)n;
+    if (s_log_cb) {
+        s_log_cb(level, buf, s_log_ud);
+        return;
+    }
+    static const char *tags[] = { "DEBUG", "INFO", "WARN", "ERROR" };
+    unsigned idx = (unsigned)level <= 3u ? (unsigned)level : 3u;
+    fprintf(stderr, "waywallen-bridge [%s] %s\n", tags[idx], buf);
+}
+
 
 /* -----------------------------------------------------------------------
  * Connection
@@ -410,14 +443,14 @@ void ww_bridge_log_gpu_info(const char *prefix,
         if (len > max_label) max_label = len;
     }
 
-    fprintf(stderr, "%s: GPU info\n", prefix ? prefix : "");
+    ww_bridge_logf(WW_BRIDGE_LOG_INFO, "%s: GPU info", prefix ? prefix : "");
     /* Format: 2-space indent, label, colon, padding so values align,
      * then the value. NULL value renders as "(null)". */
     for (size_t i = 0; i < n_fields; i++) {
         const char *lbl = fields[i].label ? fields[i].label : "";
         const char *val = fields[i].value ? fields[i].value : "(null)";
         int pad = (int)(max_label - strlen(lbl)) + 1;
-        fprintf(stderr, "  %s:%*s%s\n", lbl, pad, "", val);
+        ww_bridge_logf(WW_BRIDGE_LOG_INFO, "  %s:%*s%s", lbl, pad, "", val);
     }
 }
 
