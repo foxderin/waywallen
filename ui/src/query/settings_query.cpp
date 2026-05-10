@@ -22,11 +22,6 @@ auto layout_to_map(const proto::LayoutPrefs& l) -> QVariantMap {
     QVariantMap m;
     m[u"fillmode"_s] = static_cast<int>(l.fillmode());
     m[u"align"_s]    = static_cast<int>(l.align());
-    QVariantList rgba;
-    for (auto v : l.clearRgba()) {
-        rgba.append(QVariant(v));
-    }
-    m[u"clearRgba"_s] = rgba;
     return m;
 }
 
@@ -34,11 +29,6 @@ auto map_to_layout(const QVariantMap& m) -> proto::LayoutPrefs {
     proto::LayoutPrefs l;
     l.setFillmode(static_cast<proto::FillMode>(m.value(u"fillmode"_s).toInt()));
     l.setAlign(static_cast<proto::Align>(m.value(u"align"_s).toInt()));
-    QList<float> rgba;
-    for (const auto& v : m.value(u"clearRgba"_s).toList()) {
-        rgba.append(v.toFloat());
-    }
-    l.setClearRgba(rgba);
     return l;
 }
 

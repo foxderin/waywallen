@@ -240,6 +240,26 @@ int ww_bridge_send_bind_failed(int sock,
 /* Emit an `Error` event with a text message. */
 int ww_bridge_send_error(int sock, const char *msg);
 
+/* Emit `ReportState` — kv-list of renderer-published state the daemon
+ * merges into its per-renderer view. Same wire shape as the inbound
+ * `setting_changed` event but the other direction.
+ *
+ * Recognised keys (v1):
+ *   `clear_color` — `"r,g,b,a"`, four floats in 0..=1, comma-separated;
+ *                   feeds the daemon's display `set_config.clear_*`.
+ *
+ * Caller owns the `ww_kv_list_t` storage; the bridge reads it and
+ * encodes — no ownership transfer. */
+int ww_bridge_send_report_state(int sock,
+                                const ww_evt_report_state_t *m);
+
+/* Convenience: publish a single `clear_color = "r,g,b,a"` kv pair.
+ * Components are clamped to `[0, 1]` and formatted with `%.6f`. The
+ * caller is expected to dedupe against the previous published value
+ * (cheap to keep four floats around per-renderer). */
+int ww_bridge_send_report_state_clear_color(int sock,
+                                            float r, float g, float b, float a);
+
 
 /* -----------------------------------------------------------------------
  * Modifier negotiation

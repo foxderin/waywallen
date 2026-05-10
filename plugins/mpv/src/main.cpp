@@ -831,6 +831,14 @@ int main(int argc, char** argv) {
         rc != 0)
         die("ww_bridge_pool_advertise_caps failed: " + std::to_string(rc));
 
+    // libmpv composites video over an opaque black surface; surface
+    // it to the daemon so letterbox bars match.
+    if (int rc = ww_bridge_send_report_state_clear_color(
+            host.sock, 0.0f, 0.0f, 0.0f, 1.0f);
+        rc != 0) {
+        rstd_warn("waywallen-mpv-renderer: report_state(clear_color) failed ({})", rc);
+    }
+
     std::thread reader([&]() { reader_loop(host, mpv, wake); });
 
     // Block until first NegotiateBuffers lands.

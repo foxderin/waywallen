@@ -328,7 +328,6 @@ impl Router {
             return ResolvedLayout {
                 fillmode: FillMode::default(),
                 align: Default::default(),
-                clear_rgba: [0.0, 0.0, 0.0, 1.0],
             };
         };
         if let Some(iid) = info.instance_id.as_deref() {
@@ -361,10 +360,8 @@ impl Router {
         display_name: String,
         new_fillmode: Option<crate::display::layout::FillMode>,
         new_align: Option<crate::display::layout::Align>,
-        new_clear_rgba: Option<[f32; 4]>,
         clear_fillmode: bool,
         clear_align: bool,
-        clear_clear_rgba: bool,
     ) {
         let Some(settings) = self.settings.get().cloned() else {
             log::warn!(
@@ -402,12 +399,6 @@ impl Router {
             }
             if let Some(v) = new_align {
                 entry.align = Some(v);
-            }
-            if clear_clear_rgba {
-                entry.clear_rgba = None;
-            }
-            if let Some(v) = new_clear_rgba {
-                entry.clear_rgba = Some(v);
             }
             // Prune empty entry to keep the on-disk file tidy.
             if entry.is_empty() {
@@ -555,6 +546,13 @@ impl Router {
                             // (fourcc, modifier). Blacklist it on
                             // the producer side and re-pick.
                             router.on_renderer_bind_failed(&rid, fourcc, modifier).await;
+                        }
+                        Ok(EventMsg::ReportState { .. }) => {
+                            // The reader thread already parsed
+                            // recognised keys onto the handle (clear
+                            // color today). Re-emit set_config so live
+                            // displays pick up the new value.
+                            router.on_renderer_state_changed(&rid).await;
                         }
                         Ok(_) => {}
                         Err(RecvError::Closed) => {
@@ -768,6 +766,50 @@ impl Router {
             );
         }
         self.reconcile_buffer_flags().await;
+    }
+
+    /// Renderer published a `ReportState` event. The reader thread
+    /// already merged recognised keys onto the handle (currently just
+    /// `clear_color`). Propagate the latest values into every link
+    /// the renderer drives and re-emit `set_config` so live displays
+    /// pick up the change.
+    pub async fn on_renderer_state_changed(self: &Arc<Self>, renderer_id: &str) {
+        let new_clear = {
+            let inner = self.inner.lock().await;
+            let Some(renderer) = inner.table.get_renderer(renderer_id) else {
+                return;
+            };
+            renderer.clear_rgba()
+        };
+        let affected: Vec<DisplayId> = {
+            let mut inner = self.inner.lock().await;
+            let link_ids: Vec<LinkId> = inner
+                .table
+                .links_for_renderer(renderer_id)
+                .into_iter()
+                .map(|l| l.id)
+                .collect();
+            let mut affected = Vec::new();
+            for lid in link_ids {
+                let changed = inner.table.update_link_geometry(
+                    lid,
+                    None,
+                    None,
+                    None,
+                    Some(new_clear),
+                    None,
+                );
+                if changed {
+                    if let Some(link) = inner.table.get_link(lid) {
+                        affected.push(link.display_id);
+                    }
+                }
+            }
+            affected
+        };
+        for did in affected {
+            self.resync_display_set_config(did).await;
+        }
     }
 
     pub async fn update_display_size(
@@ -1678,7 +1720,7 @@ fn project_link(
             disp_h: info.height as f32,
             fillmode: layout.fillmode,
             align: layout.align,
-            clear_rgba: layout.clear_rgba,
+            clear_rgba: link.clear_rgba,
         });
         return ProjectedConfig {
             config_generation,
@@ -2376,7 +2418,6 @@ mod tests {
             // Even with PreserveAspectFit, explicit geometry must win.
             fillmode: FillMode::PreserveAspectFit,
             align: Default::default(),
-            clear_rgba: [0.0, 0.0, 1.0, 1.0],
         };
         let cfg = project_link(&link, &renderer, &info, 1, &layout);
         assert_eq!(

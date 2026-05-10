@@ -665,6 +665,13 @@ int main(int argc, char** argv) {
                                                | WW_MEM_HINT_HOST_VISIBLE);
         rc != 0)
         die("ww_bridge_pool_advertise_caps failed: " + std::to_string(rc));
+
+    // Renderer is the sole authority for the daemon's letterbox color.
+    if (int rc = ww_bridge_send_report_state_clear_color(
+            host.sock, 0.0f, 0.0f, 0.0f, 1.0f);
+        rc != 0) {
+        rstd_warn("waywallen-video-renderer: report_state(clear_color) failed ({})", rc);
+    }
     rstd_info("waywallen-video-renderer: ready ({}x{}, loop={}, GPU YUV→RGB), "
               "waiting for NegotiateBuffers",
               even_w, even_h, opt.loop_file ? 1 : 0);

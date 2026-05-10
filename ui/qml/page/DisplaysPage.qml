@@ -418,7 +418,7 @@ MD.Page {
                                 if (!root.selected)
                                     return false;
                                 const ovr = root.selected.layoutOverride || ({});
-                                return ovr.fillmodeSet === true || ovr.alignSet === true || ovr.clearRgbaSet === true;
+                                return ovr.fillmodeSet === true || ovr.alignSet === true;
                             }
                             icon.name: MD.Token.icon.refresh
                             T.ToolTip.visible: hovered
@@ -429,10 +429,8 @@ MD.Page {
                                 layoutSetQuery.name = root.selected.name;
                                 layoutSetQuery.fillmodeSet = false;
                                 layoutSetQuery.alignSet = false;
-                                layoutSetQuery.clearRgbaSet = false;
                                 layoutSetQuery.clearFillmode = true;
                                 layoutSetQuery.clearAlign = true;
-                                layoutSetQuery.clearClearRgba = true;
                                 layoutSetQuery.reload();
                             }
                         }
@@ -471,10 +469,8 @@ MD.Page {
                                 layoutSetQuery.fillmodeSet = true;
                                 layoutSetQuery.fillmode = root.kFillModeValues[idx];
                                 layoutSetQuery.alignSet = false;
-                                layoutSetQuery.clearRgbaSet = false;
                                 layoutSetQuery.clearFillmode = false;
                                 layoutSetQuery.clearAlign = false;
-                                layoutSetQuery.clearClearRgba = false;
                                 layoutSetQuery.reload();
                             }
                         }
@@ -546,10 +542,8 @@ MD.Page {
                                             layoutSetQuery.fillmodeSet = false;
                                             layoutSetQuery.alignSet = true;
                                             layoutSetQuery.align = parent.alignValue;
-                                            layoutSetQuery.clearRgbaSet = false;
                                             layoutSetQuery.clearFillmode = false;
                                             layoutSetQuery.clearAlign = false;
-                                            layoutSetQuery.clearClearRgba = false;
                                             layoutSetQuery.reload();
                                         }
                                     }

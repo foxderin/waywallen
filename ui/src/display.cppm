@@ -35,10 +35,10 @@ class Display : public QObject {
     Q_PROPERTY(QVariantList links READ links NOTIFY linksChanged FINAL)
     /// Resolved layout currently in use for this display
     /// (per-display override on top of global defaults). Map keys:
-    /// `fillmode` (int), `align` (int), `clearRgba` (QVariantList<float>, length 4).
+    /// `fillmode` (int), `align` (int).
     Q_PROPERTY(QVariantMap effectiveLayout READ effectiveLayout NOTIFY layoutChanged FINAL)
     /// Sparse per-display override. Same key set as effectiveLayout
-    /// plus `fillmodeSet` / `alignSet` / `clearRgbaSet` booleans
+    /// plus `fillmodeSet` / `alignSet` booleans
     /// indicating whether each field is explicitly overridden vs. inherited.
     Q_PROPERTY(QVariantMap layoutOverride READ layoutOverride NOTIFY layoutChanged FINAL)
     // DRM render-node id of the GPU this display's consumer is on.

@@ -279,7 +279,6 @@ fn layout_prefs_to_pb_resolved(r: &crate::settings::ResolvedLayout) -> pb::Layou
     pb::LayoutPrefs {
         fillmode: fillmode_to_pb(r.fillmode) as i32,
         align: align_to_pb(r.align) as i32,
-        clear_rgba: r.clear_rgba.to_vec(),
     }
 }
 
@@ -292,8 +291,6 @@ fn layout_override_to_pb(p: &crate::settings::DisplayPrefs) -> pb::LayoutOverrid
             .unwrap_or(pb::FillMode::Unspecified) as i32,
         align_set: p.align.is_some(),
         align: p.align.map(align_to_pb).unwrap_or(pb::Align::Unspecified) as i32,
-        clear_rgba_set: p.clear_rgba.is_some(),
-        clear_rgba: p.clear_rgba.map(|v| v.to_vec()).unwrap_or_default(),
     }
 }
 
@@ -375,14 +372,6 @@ fn align_from_pb(v: i32) -> Option<crate::display::layout::Align> {
         pb::Align::BottomLeft => Some(A::BottomLeft),
         pb::Align::Bottom => Some(A::Bottom),
         pb::Align::BottomRight => Some(A::BottomRight),
-    }
-}
-
-fn clear_rgba_from_pb(v: &[f32]) -> Option<[f32; 4]> {
-    if v.len() == 4 {
-        Some([v[0], v[1], v[2], v[3]])
-    } else {
-        None
     }
 }
 
@@ -555,7 +544,6 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
             let layout_defaults = pb::LayoutPrefs {
                 fillmode: fillmode_to_pb(snap.global.layout.fillmode) as i32,
                 align: align_to_pb(snap.global.layout.align) as i32,
-                clear_rgba: snap.global.layout.clear_rgba.to_vec(),
             };
             Some(pb::Event {
                 payload: Some(pb::event::Payload::SettingsChanged(pb::SettingsChanged {
@@ -926,24 +914,14 @@ async fn dispatch_inner(
                     .filter(|o| o.align_set)
                     .and_then(|o| align_from_pb(o.align))
             };
-            let new_clear_rgba = if r.clear_clear_rgba {
-                None
-            } else {
-                r.r#override
-                    .as_ref()
-                    .filter(|o| o.clear_rgba_set)
-                    .and_then(|o| clear_rgba_from_pb(&o.clear_rgba))
-            };
             state
                 .router
                 .set_display_layout(
                     r.name.clone(),
                     new_fillmode,
                     new_align,
-                    new_clear_rgba,
                     r.clear_fillmode,
                     r.clear_align,
-                    r.clear_clear_rgba,
                 )
                 .await;
             // Look up the (possibly absent) DisplayInfo to return.
@@ -1136,7 +1114,6 @@ async fn dispatch_inner(
             let layout_defaults = pb::LayoutPrefs {
                 fillmode: fillmode_to_pb(snap.global.layout.fillmode) as i32,
                 align: align_to_pb(snap.global.layout.align) as i32,
-                clear_rgba: snap.global.layout.clear_rgba.to_vec(),
             };
             Res::SettingsGet(pb::SettingsGetResponse {
                 global: Some(pb::GlobalSettings {
@@ -1217,9 +1194,6 @@ async fn dispatch_inner(
                         }
                         if let Some(al) = align_from_pb(ld.align) {
                             s.global.layout.align = al;
-                        }
-                        if let Some(rgba) = clear_rgba_from_pb(&ld.clear_rgba) {
-                            s.global.layout.clear_rgba = rgba;
                         }
                     }
                 }

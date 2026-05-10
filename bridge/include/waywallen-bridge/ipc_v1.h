@@ -110,6 +110,7 @@ typedef enum ww_event_op {
     WW_EVT_FORMAT_CAPS = 6,
     WW_EVT_BIND_FAILED = 7,
     WW_EVT_INIT_NACK = 8,
+    WW_EVT_REPORT_STATE = 9,
 } ww_event_op_t;
 
 typedef struct ww_evt_in_init_t {
@@ -241,6 +242,10 @@ typedef struct ww_evt_init_nack_t {
     char *reason;
 } ww_evt_init_nack_t;
 
+typedef struct ww_evt_report_state_t {
+    ww_kv_list_t state;
+} ww_evt_report_state_t;
+
 /* --- Per-message functions ---
  * encode:        append wire body to `out` (header is the caller's job)
  * decode:        consume `len` bytes; on success owns heap allocations
@@ -337,6 +342,11 @@ int  ww_evt_init_nack_encode(const ww_evt_init_nack_t *m, ww_buf_t *out);
 int  ww_evt_init_nack_decode(const uint8_t *buf, size_t len, ww_evt_init_nack_t *out);
 void ww_evt_init_nack_free(ww_evt_init_nack_t *m);
 uint32_t ww_evt_init_nack_expected_fds(const ww_evt_init_nack_t *m);
+
+int  ww_evt_report_state_encode(const ww_evt_report_state_t *m, ww_buf_t *out);
+int  ww_evt_report_state_decode(const uint8_t *buf, size_t len, ww_evt_report_state_t *out);
+void ww_evt_report_state_free(ww_evt_report_state_t *m);
+uint32_t ww_evt_report_state_expected_fds(const ww_evt_report_state_t *m);
 
 /* --- Output buffer helpers --- */
 void ww_buf_init(ww_buf_t *b);

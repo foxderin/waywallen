@@ -1070,3 +1070,36 @@ uint32_t ww_evt_init_nack_expected_fds(const ww_evt_init_nack_t *m) {
     return 0;
 }
 
+int ww_evt_report_state_encode(const ww_evt_report_state_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_kv_list(out, &m->state))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_report_state_decode(const uint8_t *buf, size_t len, ww_evt_report_state_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_kv_list(&r, &out->state))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_report_state_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_report_state_free(out);
+    return rc;
+}
+
+void ww_evt_report_state_free(ww_evt_report_state_t *m) {
+    free_kv_list(&m->state);
+}
+
+uint32_t ww_evt_report_state_expected_fds(const ww_evt_report_state_t *m) {
+    (void)m;
+    return 0;
+}
+

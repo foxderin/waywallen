@@ -396,13 +396,13 @@ enum Align {
 // default in `GlobalSettings.layout_defaults` and for the effective
 // layout broadcast back to clients on `DisplayInfo`.
 //
-// `clear_rgba` is a 4-element RGBA float array (sRGB straight alpha,
-// 0..=1). Empty array means "inherit / unset"; the daemon always
-// emits exactly 4 elements when it serializes an effective layout.
+// Background / clear color is NOT part of layout. The renderer is
+// the sole authority — see `report_state` in waywallen_ipc_v1.
 message LayoutPrefs {
   FillMode fillmode = 1;
   Align    align    = 2;
-  repeated float clear_rgba = 3 [packed = true];
+  reserved 3;
+  reserved "clear_rgba";
 }
 
 // Sparse per-display override. Each *_set flag, when true, indicates
@@ -415,8 +415,8 @@ message LayoutOverride {
   FillMode fillmode = 2;
   bool align_set    = 3;
   Align align       = 4;
-  bool clear_rgba_set = 5;
-  repeated float clear_rgba = 6 [packed = true];
+  reserved 5, 6;
+  reserved "clear_rgba_set", "clear_rgba";
 }
 
 message DisplayInfo {
@@ -469,7 +469,8 @@ message DisplayLayoutSetRequest {
   // field to the global default without sending the full override.
   bool clear_fillmode = 3;
   bool clear_align    = 4;
-  bool clear_clear_rgba = 5;
+  reserved 5;
+  reserved "clear_clear_rgba";
 }
 
 message DisplayLayoutSetResponse {
@@ -688,9 +689,7 @@ message GlobalSettings {
   //
   // Daemon-wide layout defaults applied when a display has no
   // per-display override. UI sends these as the "default for new
-  // displays" preset. `clear_rgba` may be empty in `SettingsSetRequest`
-  // — the daemon then falls back to opaque black [0,0,0,1]; in
-  // `SettingsGetResponse` the daemon always emits exactly 4 floats.
+  // displays" preset.
   LayoutPrefs layout_defaults = 3;
 }
 

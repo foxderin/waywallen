@@ -223,7 +223,7 @@ MD.Page {
                         text: root.sortOptions[root.sortIndex].name
                         trailingIconName: root.sortAsc ? MD.Token.icon.arrow_downward
                                                        : MD.Token.icon.arrow_upward
-                        borderWidth: 1
+                        mdState.borderWidth: 1
                         onClicked: sortMenu.open()
 
                         MD.Menu {

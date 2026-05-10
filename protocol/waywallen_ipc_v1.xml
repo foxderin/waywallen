@@ -508,4 +508,31 @@
     <arg name="reason" type="string"/>
   </event>
 
+  <!--
+    Renderer-published state — kv-list of optional self-describing
+    properties the renderer wants the daemon to know. Sent at any point
+    after `ready`; the daemon merges keys into its per-renderer state
+    and re-emits whatever downstream wire fields each key feeds.
+
+    Direction mirrors `setting_changed` (opcode 2) but the other way:
+    `setting_changed` is daemon → renderer; `report_state` is renderer
+    → daemon. Both are pure kv lists — no typed scalar promotion. The
+    daemon ignores keys it does not recognise.
+
+    Recognised keys (v1):
+      `clear_color` — four floats in `0..=1`, comma-separated as
+                      `"r,g,b,a"` (RGBA non-premultiplied straight
+                      alpha, sRGB). Becomes the `clear_{r,g,b,a}` field
+                      of the daemon's outbound display
+                      `set_config` (waywallen_display_v1 opcode 4) for
+                      every display routed from this renderer. The
+                      daemon clamps each component into `[0,1]` and
+                      forces `a = 1.0` on parse failure or absence;
+                      the rendered DMA-BUF is opaque, alpha only
+                      affects letterbox bars.
+  -->
+  <event name="report_state" opcode="9">
+    <arg name="state" type="kv_list"/>
+  </event>
+
 </protocol>

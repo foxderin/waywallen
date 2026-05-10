@@ -670,6 +670,17 @@ int main(int argc, char** argv) {
                                                WW_MEM_HINT_DEVICE_LOCAL | WW_MEM_HINT_HOST_VISIBLE);
         rc != 0)
         die("ww_bridge_pool_advertise_caps failed: " + std::to_string(rc));
+
+    // Renderer is the sole authority for the daemon's display
+    // letterbox color. Image producers have no scene-level color, so
+    // we publish opaque black; the daemon falls back to the same
+    // value when the renderer never publishes, but being explicit
+    // keeps the wire shape uniform.
+    if (int rc = ww_bridge_send_report_state_clear_color(
+            host.sock, 0.0f, 0.0f, 0.0f, 1.0f);
+        rc != 0) {
+        rstd_warn("waywallen-image-renderer: report_state(clear_color) failed ({})", rc);
+    }
     rstd_info("waywallen-image-renderer: ready, advertised caps, "
               "waiting for NegotiateBuffers");
 

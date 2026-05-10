@@ -33,10 +33,12 @@ private:
 /// Mutate a single display's per-display layout override. Set
 /// `fillmodeSet` (true) + `fillmode` (int FillMode enum) to write a
 /// fillmode override; `clearFillmode = true` removes the override
-/// (revert to global default). Same pattern for `align*` and
-/// `clearRgba*`. Empty `name` is rejected by the daemon. The daemon
-/// re-emits `set_config` to the live consumer and broadcasts a
+/// (revert to global default). Same pattern for `align*`. Empty
+/// `name` is rejected by the daemon. The daemon re-emits
+/// `set_config` to the live consumer and broadcasts a
 /// `DisplayChanged` event with the refreshed `effectiveLayout`.
+///
+/// Clear color is NOT exposed here — it's owned by the renderer.
 export class DisplayLayoutSetQuery : public Query,
                                      public QueryExtra<control::v1::Response, DisplayLayoutSetQuery> {
     Q_OBJECT
@@ -47,11 +49,8 @@ export class DisplayLayoutSetQuery : public Query,
     Q_PROPERTY(int fillmode READ fillmode WRITE setFillmode NOTIFY paramsChanged FINAL)
     Q_PROPERTY(bool alignSet READ alignSet WRITE setAlignSet NOTIFY paramsChanged FINAL)
     Q_PROPERTY(int align READ align WRITE setAlign NOTIFY paramsChanged FINAL)
-    Q_PROPERTY(bool clearRgbaSet READ clearRgbaSet WRITE setClearRgbaSet NOTIFY paramsChanged FINAL)
-    Q_PROPERTY(QVariantList clearRgba READ clearRgba WRITE setClearRgba NOTIFY paramsChanged FINAL)
     Q_PROPERTY(bool clearFillmode READ clearFillmode WRITE setClearFillmode NOTIFY paramsChanged FINAL)
     Q_PROPERTY(bool clearAlign READ clearAlign WRITE setClearAlign NOTIFY paramsChanged FINAL)
-    Q_PROPERTY(bool clearClearRgba READ clearClearRgba WRITE setClearClearRgba NOTIFY paramsChanged FINAL)
 
 public:
     DisplayLayoutSetQuery(QObject* parent = nullptr);
@@ -66,16 +65,10 @@ public:
     void setAlignSet(bool v);
     auto align() const -> int { return m_align; }
     void setAlign(int v);
-    auto clearRgbaSet() const -> bool { return m_clear_rgba_set; }
-    void setClearRgbaSet(bool v);
-    auto clearRgba() const -> const QVariantList& { return m_clear_rgba; }
-    void setClearRgba(const QVariantList& v);
     auto clearFillmode() const -> bool { return m_clear_fillmode; }
     void setClearFillmode(bool v);
     auto clearAlign() const -> bool { return m_clear_align; }
     void setClearAlign(bool v);
-    auto clearClearRgba() const -> bool { return m_clear_clear_rgba; }
-    void setClearClearRgba(bool v);
 
     void reload() override;
 
@@ -87,11 +80,8 @@ private:
     int          m_fillmode { 0 };
     bool         m_align_set { false };
     int          m_align { 0 };
-    bool         m_clear_rgba_set { false };
-    QVariantList m_clear_rgba;
     bool         m_clear_fillmode { false };
     bool         m_clear_align { false };
-    bool         m_clear_clear_rgba { false };
 };
 
 } // namespace waywallen

@@ -88,11 +88,8 @@ void DisplayLayoutSetQuery::setFillmodeSet(bool v) { WW_SET(m_fillmode_set, v); 
 void DisplayLayoutSetQuery::setFillmode(int v) { WW_SET(m_fillmode, v); }
 void DisplayLayoutSetQuery::setAlignSet(bool v) { WW_SET(m_align_set, v); }
 void DisplayLayoutSetQuery::setAlign(int v) { WW_SET(m_align, v); }
-void DisplayLayoutSetQuery::setClearRgbaSet(bool v) { WW_SET(m_clear_rgba_set, v); }
-void DisplayLayoutSetQuery::setClearRgba(const QVariantList& v) { WW_SET(m_clear_rgba, v); }
 void DisplayLayoutSetQuery::setClearFillmode(bool v) { WW_SET(m_clear_fillmode, v); }
 void DisplayLayoutSetQuery::setClearAlign(bool v) { WW_SET(m_clear_align, v); }
-void DisplayLayoutSetQuery::setClearClearRgba(bool v) { WW_SET(m_clear_clear_rgba, v); }
 #undef WW_SET
 
 void DisplayLayoutSetQuery::reload() {
@@ -104,19 +101,12 @@ void DisplayLayoutSetQuery::reload() {
     ovr.setFillmode(static_cast<proto::FillMode>(m_fillmode));
     ovr.setAlignSet(m_align_set);
     ovr.setAlign(static_cast<proto::Align>(m_align));
-    ovr.setClearRgbaSet(m_clear_rgba_set);
-    if (m_clear_rgba_set) {
-        QList<float> rgba;
-        for (const auto& v : m_clear_rgba) rgba.append(v.toFloat());
-        ovr.setClearRgba(rgba);
-    }
 
     proto::DisplayLayoutSetRequest inner;
     inner.setName(m_name);
     inner.setOverride(ovr);
     inner.setClearFillmode(m_clear_fillmode);
     inner.setClearAlign(m_clear_align);
-    inner.setClearClearRgba(m_clear_clear_rgba);
 
     auto req = proto::Request {};
     req.setDisplayLayoutSet(std::move(inner));

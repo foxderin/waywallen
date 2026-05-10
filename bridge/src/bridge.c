@@ -425,6 +425,35 @@ int ww_bridge_send_error(int sock, const char *msg) {
     WW_SEND_EVENT(sock, WW_EVT_ERROR, ww_evt_error_encode, &m, NULL, 0);
 }
 
+int ww_bridge_send_report_state(int sock, const ww_evt_report_state_t *m) {
+    if (!m) return -EINVAL;
+    WW_SEND_EVENT(sock, WW_EVT_REPORT_STATE, ww_evt_report_state_encode,
+                  m, NULL, 0);
+}
+
+static float clamp01_(float v) {
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+
+int ww_bridge_send_report_state_clear_color(int sock,
+                                            float r, float g, float b, float a) {
+    char value[96];
+    int n = snprintf(value, sizeof(value), "%.6f,%.6f,%.6f,%.6f",
+                     clamp01_(r), clamp01_(g), clamp01_(b), clamp01_(a));
+    if (n < 0 || (size_t)n >= sizeof(value)) return -EINVAL;
+
+    ww_kv_t kv = {
+        .key   = (char *)"clear_color",
+        .value = value,
+    };
+    ww_evt_report_state_t m = {
+        .state = { .count = 1, .data = &kv },
+    };
+    return ww_bridge_send_report_state(sock, &m);
+}
+
 
 /* -----------------------------------------------------------------------
  * Diagnostics

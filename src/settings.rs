@@ -39,24 +39,15 @@ const DEBOUNCE_WRITE: Duration = Duration::from_secs(2);
 
 /// Daemon-wide layout defaults applied to displays that have no
 /// `[displays.<name>]` override.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Clear color is NOT a layout setting — it lives entirely with the
+/// renderer (see `RendererHandle::clear_rgba`). The daemon never lets
+/// the user override it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutDefaults {
     pub fillmode: FillMode,
     pub align: Align,
-    /// sRGB straight alpha, 0..=1. Used as the letterbox color in fit
-    /// modes when the texture doesn't fully cover the display.
-    pub clear_rgba: [f32; 4],
-}
-
-impl Default for LayoutDefaults {
-    fn default() -> Self {
-        Self {
-            fillmode: FillMode::default(),
-            align: Align::default(),
-            clear_rgba: [0.0, 0.0, 0.0, 1.0],
-        }
-    }
 }
 
 /// Per-display override. Each field is `Option`; `None` means "inherit
@@ -67,12 +58,11 @@ impl Default for LayoutDefaults {
 pub struct DisplayPrefs {
     pub fillmode: Option<FillMode>,
     pub align: Option<Align>,
-    pub clear_rgba: Option<[f32; 4]>,
 }
 
 impl DisplayPrefs {
     pub fn is_empty(&self) -> bool {
-        self.fillmode.is_none() && self.align.is_none() && self.clear_rgba.is_none()
+        self.fillmode.is_none() && self.align.is_none()
     }
 }
 
@@ -81,7 +71,6 @@ impl DisplayPrefs {
 pub struct ResolvedLayout {
     pub fillmode: FillMode,
     pub align: Align,
-    pub clear_rgba: [f32; 4],
 }
 
 /// How the daemon shapes the `(extent_w, extent_h, extent_mode)` it
@@ -545,9 +534,6 @@ impl SettingsStore {
         ResolvedLayout {
             fillmode: prefs.and_then(|p| p.fillmode).unwrap_or(defaults.fillmode),
             align: prefs.and_then(|p| p.align).unwrap_or(defaults.align),
-            clear_rgba: prefs
-                .and_then(|p| p.clear_rgba)
-                .unwrap_or(defaults.clear_rgba),
         }
     }
 
@@ -861,12 +847,10 @@ mod tests {
 [global.layout]
 fillmode = "preserve_aspect_crop"
 align = "top_right"
-clear_rgba = [0.5, 0.0, 0.5, 1.0]
 "#;
         let s: Settings = toml::from_str(src).unwrap();
         assert_eq!(s.global.layout.fillmode, FillMode::PreserveAspectCrop);
         assert_eq!(s.global.layout.align, Align::TopRight);
-        assert_eq!(s.global.layout.clear_rgba, [0.5, 0.0, 0.5, 1.0]);
     }
 
     #[test]
@@ -878,13 +862,11 @@ align = "center"
 
 [display.HDMI-A-1]
 fillmode = "preserve_aspect_fit"
-clear_rgba = [0.0, 0.0, 1.0, 1.0]
 "#;
         let s: Settings = toml::from_str(src).unwrap();
         let prefs = s.displays.get("HDMI-A-1").unwrap();
         assert_eq!(prefs.fillmode, Some(FillMode::PreserveAspectFit));
         assert_eq!(prefs.align, None); // inherits
-        assert_eq!(prefs.clear_rgba, Some([0.0, 0.0, 1.0, 1.0]));
     }
 
     #[tokio::test]
@@ -901,13 +883,11 @@ clear_rgba = [0.0, 0.0, 1.0, 1.0]
         // Set a partial override for "eDP-1" (only fillmode).
         store.update(|s| {
             s.global.layout.align = Align::Bottom;
-            s.global.layout.clear_rgba = [0.1, 0.2, 0.3, 1.0];
             s.displays.insert(
                 "eDP-1".into(),
                 DisplayPrefs {
                     fillmode: Some(FillMode::PreserveAspectCrop),
                     align: None,
-                    clear_rgba: None,
                 },
             );
         });
@@ -915,7 +895,6 @@ clear_rgba = [0.0, 0.0, 1.0, 1.0]
         let r = store.resolved_layout("eDP-1");
         assert_eq!(r.fillmode, FillMode::PreserveAspectCrop); // override
         assert_eq!(r.align, Align::Bottom); // global
-        assert_eq!(r.clear_rgba, [0.1, 0.2, 0.3, 1.0]); // global
     }
 
     #[test]

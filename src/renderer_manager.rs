@@ -255,6 +255,12 @@ pub struct RendererHandle {
     /// are validated against the recognised set in
     /// `RendererRegistry::scan`.
     events_subscribed: Arc<Vec<String>>,
+
+    /// Renderer-published clear color (RGBA, 0..=1, sRGB straight
+    /// alpha). Sole source of truth for the daemon's outbound display
+    /// `set_config.clear_*` field. Default `[0, 0, 0, 1]` until the
+    /// renderer emits a `ReportState { clear_color = "..." }`.
+    clear_rgba: Arc<StdMutex<[f32; 4]>>,
 }
 
 impl RendererHandle {
@@ -409,6 +415,16 @@ impl RendererHandle {
             return Err("no reaper wired (test stub or unconfigured renderer)");
         };
         tx.send(record).map_err(|_| "reaper channel closed")
+    }
+
+    /// Renderer-published clear color (RGBA, 0..=1). Defaults to
+    /// opaque black until the renderer emits its first `ReportState`
+    /// with a `clear_color` key.
+    pub fn clear_rgba(&self) -> [f32; 4] {
+        self.clear_rgba
+            .lock()
+            .map(|g| *g)
+            .unwrap_or([0.0, 0.0, 0.0, 1.0])
     }
 }
 
@@ -657,6 +673,8 @@ impl RendererManager {
         let format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>> =
             Arc::new(StdMutex::new(None));
         let pending_configure: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
+        let clear_rgba: Arc<StdMutex<[f32; 4]>> =
+            Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0]));
 
         let sock = Arc::new(StdMutex::new(std_stream));
         let reader_sock = sock.clone();
@@ -666,6 +684,7 @@ impl RendererManager {
         let reader_release_syncobj = release_syncobj.clone();
         let reader_format_caps = format_caps.clone();
         let reader_pending = pending_configure.clone();
+        let reader_clear_rgba = clear_rgba.clone();
         let reader_id = id.clone();
         let reader_reap_tx = self.reap_tx.clone();
         thread::spawn(move || {
@@ -678,6 +697,7 @@ impl RendererManager {
                 reader_release_syncobj,
                 reader_format_caps,
                 reader_pending,
+                reader_clear_rgba,
                 reader_reap_tx,
             );
         });
@@ -723,6 +743,7 @@ impl RendererManager {
             pending_configure,
             child: Arc::new(TokioMutex::new(Some(child))),
             events_subscribed: Arc::new(renderer_def.events.clone()),
+            clear_rgba,
         });
 
         if handle.frame_record_tx.is_some() {
@@ -1103,6 +1124,7 @@ fn run_reader(
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
     format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
     pending_configure: Arc<StdMutex<Option<u32>>>,
+    clear_rgba: Arc<StdMutex<[f32; 4]>>,
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
 ) {
     // Any exit path from this thread — clean EOF, recvmsg error, or
@@ -1340,6 +1362,22 @@ fn run_reader(
                 "renderer {id}: BindFailed fourcc=0x{fourcc:08x} \
                  modifier=0x{modifier:x} reason={reason} msg={message:?}"
             );
+        } else if let EventMsg::ReportState { ref state } = msg {
+            // Recognised keys are stashed on the handle; unknown keys
+            // are ignored. Currently only `clear_color` is consumed.
+            for (k, v) in state.iter() {
+                if k == "clear_color" {
+                    if let Some(rgba) = parse_clear_color(v) {
+                        if let Ok(mut g) = clear_rgba.lock() {
+                            *g = rgba;
+                        }
+                    } else {
+                        log::warn!(
+                            "renderer {id}: ReportState clear_color={v:?} unparseable, ignored"
+                        );
+                    }
+                }
+            }
         } else if !fds.is_empty() {
             log::warn!("renderer {id}: unexpected fds on event {msg:?}, dropping");
         }
@@ -1482,6 +1520,26 @@ pub(crate) fn run_init_handshake(sock: &StdUnixStream, init: &ControlMsg) -> Res
 #[allow(dead_code)]
 fn _assert_path_ok<P: AsRef<std::path::Path>>(_p: P) {} // compile-time shim
 
+/// Parse a `"r,g,b,a"` clear-color value. Components clamped to
+/// `[0, 1]`. Returns `None` when the string is malformed (wrong
+/// component count, non-numeric, NaN). Whitespace around components
+/// is permitted.
+fn parse_clear_color(s: &str) -> Option<[f32; 4]> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut out = [0.0f32; 4];
+    for (i, p) in parts.iter().enumerate() {
+        let v: f32 = p.parse().ok()?;
+        if !v.is_finite() {
+            return None;
+        }
+        out[i] = v.clamp(0.0, 1.0);
+    }
+    Some(out)
+}
+
 // ---------------------------------------------------------------------------
 // Test stubs
 // ---------------------------------------------------------------------------
@@ -1538,6 +1596,7 @@ impl RendererHandle {
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
             events_subscribed: Arc::new(Vec::new()),
+            clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         })
     }
 
@@ -1803,6 +1862,7 @@ mod reuse_tests {
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
             events_subscribed: Arc::new(Vec::new()),
+            clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         })
     }
 
@@ -1890,6 +1950,7 @@ mod reuse_tests {
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
             events_subscribed: Arc::new(Vec::new()),
+            clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         });
         mgr.register_test_handle(Arc::clone(&h)).await;
 
