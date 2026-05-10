@@ -682,8 +682,8 @@ pub struct ItemWriteOutcome {
 /// `update_at` only when size or modified_at actually changed; a no-op
 /// stat (file unchanged) still stamps `stat_at` so the cooldown filter
 /// knows we tried.
-pub async fn update_item_stat(
-    db: &DatabaseConnection,
+pub async fn update_item_stat<C: ConnectionTrait>(
+    db: &C,
     id: i64,
     stat: &FileStat,
 ) -> Result<ItemWriteOutcome> {
@@ -719,8 +719,8 @@ pub async fn update_item_stat(
 /// `probed_at`. `None` in `meta` means "unknown — leave existing alone".
 /// `update_at` is bumped only when at least one of the three media
 /// columns actually changed.
-pub async fn update_item_media(
-    db: &DatabaseConnection,
+pub async fn update_item_media<C: ConnectionTrait>(
+    db: &C,
     id: i64,
     meta: &MediaMeta,
 ) -> Result<ItemWriteOutcome> {
