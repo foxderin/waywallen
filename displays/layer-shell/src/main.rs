@@ -1576,12 +1576,20 @@ fn import_dmabufs(
     plane_offset: &[u32],
     fds: Vec<OwnedFd>,
 ) -> Result<Vec<WlBuffer>> {
-    let queue = binding.conn.new_event_queue::<App>();
-    let qh = queue.handle();
+    // Use the main thread's QueueHandle (cloned on the binding) so
+    // wl_buffer events — crucially `Release` — land on the queue that
+    // the main thread actually polls. A previous version created a
+    // throwaway event_queue here and dropped it at function end,
+    // which silently routed every `Release` event into a dead queue:
+    // the helper never signaled the release_syncobj, the daemon's
+    // reaper timed out every wait point ("wait point N timed out /
+    // errored (Timer expired); force-signaling stragglers" at ~1 Hz),
+    // and the producer was throttled to a 1 fps pipeline.
+    let qh = &binding.qh;
 
     let mut buffers = Vec::with_capacity(count as usize);
     for b in 0..count as usize {
-        let params = binding.dmabuf.create_params(&qh, ());
+        let params = binding.dmabuf.create_params(qh, ());
         let mod_hi = (modifier >> 32) as u32;
         let mod_lo = (modifier & 0xffff_ffff) as u32;
         for p in 0..planes_per_buffer as usize {
@@ -1601,7 +1609,7 @@ fn import_dmabufs(
             height as i32,
             fourcc,
             zwp_linux_buffer_params_v1::Flags::empty(),
-            &qh,
+            qh,
             // (output_name, buffer_index) — Dispatch::<WlBuffer> uses
             // these to route the Release event back to the right
             // binding's pending_release_fds queue.
@@ -1609,7 +1617,6 @@ fn import_dmabufs(
         );
         buffers.push(buffer);
     }
-    drop(queue);
     drop(fds);
     Ok(buffers)
 }
