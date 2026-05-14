@@ -13,8 +13,7 @@
 import rstd.cppstd;
 import rstd.log;
 import wavsen.video;
-import wavsen.audio.byte_stream;
-import wavsen.audio.av_sync;
+import wavsen.audio;
 
 #include <rstd/macro.hpp>
 
