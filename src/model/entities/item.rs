@@ -45,6 +45,14 @@ pub struct Model {
     pub modified_at: Option<i64>,
     /// Cooldown anchor for the stat tier. `None` means never stat'd.
     pub stat_at: Option<i64>,
+    /// JSON map of per-item user-property overrides. Each key is the
+    /// shader's `u_*` uniform name (matches keys in the renderer's
+    /// `ReportProperties` schema); each value is the wire-serialized
+    /// scalar (color → "r g b" or "r g b a"; slider → numeric string;
+    /// bool → "true"/"false"; string → raw). Merged into Init.settings
+    /// on apply so the renderer's unknown-key path routes them to
+    /// `setPropertyString`. `None` when the user hasn't edited anything.
+    pub user_property_overrides: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

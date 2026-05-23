@@ -72,6 +72,12 @@ pub struct SpawnRequest {
     /// user-chosen non-default renderer isn't transparently swapped
     /// for the priority winner on reuse or fresh spawn.
     pub renderer_name: Option<String>,
+    /// Raw JSON dump of the DB row's `user_property_overrides` column
+    /// (an object mapping project.json property keys to user-edited
+    /// values). Forwarded verbatim through `Init.user_properties`; the
+    /// renderer parses it once on startup. `None` / empty string when
+    /// the wallpaper has no per-item overrides.
+    pub user_properties_json: Option<String>,
 }
 
 /// Snapshot of the most recent `BindBuffers` event, plus the DMA-BUF FDs
@@ -820,6 +826,16 @@ impl RendererManager {
         inner.renderers.get(id).cloned()
     }
 
+    /// Locate a live renderer whose `extras["path"]` matches the given
+    /// resource. Used by WallpaperPropertySet to route the kv to the
+    /// right child.
+    pub async fn find_by_resource(&self, resource: &str) -> Option<Arc<RendererHandle>> {
+        let inner = self.inner.lock().await;
+        inner.renderers.values().find_map(|h| {
+            (h.extras.get("path").map(String::as_str) == Some(resource)).then(|| h.clone())
+        })
+    }
+
     pub async fn list(&self) -> Vec<RendererId> {
         let inner = self.inner.lock().await;
         inner.renderers.keys().cloned().collect()
@@ -1496,6 +1512,7 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
         extent_h: req.height,
         extent_mode: req.extent_mode,
         settings,
+        user_properties: req.user_properties_json.clone().unwrap_or_default(),
     }
 }
 
@@ -1741,6 +1758,7 @@ mod init_handshake_tests {
             extent_mode: 0,
             test_pattern: false,
             renderer_name: None,
+            user_properties_json: None,
         };
         let msg = build_init_msg(&req, &def_mpv_schema());
         match msg {
@@ -1750,12 +1768,14 @@ mod init_handshake_tests {
                 extent_h,
                 extent_mode,
                 settings,
+                user_properties,
             } => {
                 assert_eq!(spawn_version, 1); // pulled from def_mpv_schema
                 assert_eq!(extent_w, 1920);
                 assert_eq!(extent_h, 1080);
                 assert_eq!(extent_mode, 0);
                 assert_eq!(settings, vec![("loop_file".to_string(), "inf".to_string())]);
+                assert_eq!(user_properties, "");
             }
             other => panic!("expected ControlMsg::Init, got {other:?}"),
         }
@@ -1801,6 +1821,7 @@ mod init_handshake_tests {
             extent_mode: 0,
             test_pattern: false,
             renderer_name: None,
+            user_properties_json: None,
         };
         let init = build_init_msg(&req, &def_legacy("wescene-renderer"));
         let err =
@@ -1899,6 +1920,7 @@ mod reuse_tests {
             extent_mode: 0,
             test_pattern: false,
             renderer_name: None,
+            user_properties_json: None,
         }
     }
 

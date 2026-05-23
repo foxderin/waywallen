@@ -1,6 +1,7 @@
 export module waywallen;
 export import :proto;
 export import :action;
+export import :util;
 export import :app;
 export import :backend;
 export import :daemon_dbus;
@@ -13,5 +14,6 @@ export import :msg.store;
 export import :model.store_item;
 export import :model.list_models;
 export import :model.filter_rule;
+export import :model.user_property;
 export import :query;
 export import :thumb.service;

@@ -664,6 +664,7 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t *out) {
     out->extent_h         = ctl.u.init.extent_h;
     out->extent_mode      = ctl.u.init.extent_mode;
     out->settings         = ctl.u.init.settings;
+    out->user_properties  = ctl.u.init.user_properties;
 
     /* Zero the union members we just stole so `ww_bridge_control_free`
      * is safe even if a future refactor calls it. */
@@ -688,6 +689,7 @@ void ww_bridge_init_free(ww_bridge_init_t *out) {
         }
         free(out->settings.data);
     }
+    free(out->user_properties);
     memset(out, 0, sizeof(*out));
 }
 

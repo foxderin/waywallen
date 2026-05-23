@@ -165,10 +165,30 @@ async fn apply_wallpaper_core(
     // on `SettingsSet`). The D-Bus / scheduler / rotator entry points
     // don't take per-call setting overrides, so this is the canonical
     // source.
-    let spawn_settings = app
+    let mut spawn_settings = app
         .settings
         .plugin(&renderer_plugin_name)
         .unwrap_or_default();
+    // Per-item user-property overrides ship as a separate JSON blob in
+    // `Init.user_properties`, decoupled from the schema-validated
+    // plugin settings. The renderer parses the JSON once on startup
+    // (`scene_main.cpp`) and routes each entry through the WE
+    // user-property pipeline. Sending the raw DB value avoids
+    // round-tripping through `HashMap<String, String>` and prevents
+    // accidental name collisions with native plugin settings.
+    let mut user_properties_json: Option<String> = None;
+    if !entry.library_root.is_empty() {
+        if let Some(rel) =
+            crate::queue::relative_under_root(&entry.library_root, &entry.resource)
+        {
+            if let Ok(Some(it)) =
+                repo::find_item_by_library_path(&app.db, &entry.library_root, &rel).await
+            {
+                user_properties_json =
+                    repo::get_user_property_overrides_raw(&app.db, it.id).await.unwrap_or(None);
+            }
+        }
+    }
     let spawn_req = renderer_manager::SpawnRequest {
         wp_type: entry.wp_type.clone(),
         extras,
@@ -178,6 +198,7 @@ async fn apply_wallpaper_core(
         extent_mode,
         test_pattern: false,
         renderer_name: None,
+        user_properties_json,
     };
     // renderer_manager still returns anyhow today (Phase 3 will give
     // it typed Error). The blanket `From<anyhow::Error>` lands this in

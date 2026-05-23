@@ -481,6 +481,12 @@ typedef struct ww_bridge_init {
     uint32_t      extent_h;
     uint32_t      extent_mode;       /* ww_extent_mode_t */
     ww_kv_list_t  settings;
+    /* Raw JSON object forwarded from the DB row's
+     * `user_property_overrides` column (project.json property key →
+     * value). The renderer decodes once and routes through its
+     * user-property pipeline. `NULL` / "" when no overrides exist.
+     * Heap-owned; freed by `ww_bridge_init_free`. */
+    char         *user_properties;
 } ww_bridge_init_t;
 
 /* Receive the daemon's typed `init` request and copy it into `out`.

@@ -328,6 +328,12 @@ impl SourceManager {
             })?;
         ctx.set("json_parse", json_parse_fn)?;
 
+        // ctx.json_encode(value) -> string|nil
+        let json_encode_fn = self.lua.create_function(|_, val: mlua::Value| {
+            Ok(lua_to_json(&val).and_then(|j| serde_json::to_string(&j).ok()))
+        })?;
+        ctx.set("json_encode", json_encode_fn)?;
+
         // ctx.log(msg)
         let log_fn = self.lua.create_function(|_, msg: String| {
             log::info!("[lua] {msg}");
@@ -587,6 +593,48 @@ impl SourceManager {
             })
     }
 
+    /// Ask the plugin that produced `entry` for the wallpaper's
+    /// editable property schema as a JSON string (the shape WE's
+    /// `project.json::general.properties` exports). `Ok(None)` when
+    /// the plugin doesn't expose `properties` or returned nil — both
+    /// are normal for non-WE sources.
+    pub async fn call_properties(
+        &self,
+        plugin_name: &str,
+        entry: &WallpaperEntry,
+    ) -> Result<Option<String>> {
+        let key = self
+            .plugins
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let module: LuaTable = self.lua.registry_value(key)?;
+        let props_fn: LuaFunction = match module.get("properties") {
+            Ok(f) => f,
+            Err(_) => return Ok(None),
+        };
+        let entry_tbl = self.lua.create_table()?;
+        entry_tbl.set("id", entry.id.clone())?;
+        entry_tbl.set("name", entry.name.clone())?;
+        entry_tbl.set("wp_type", entry.wp_type.clone())?;
+        entry_tbl.set("resource", entry.resource.clone())?;
+        if !entry.library_root.is_empty() {
+            entry_tbl.set("library_root", entry.library_root.clone())?;
+        }
+        if let Some(eid) = &entry.external_id {
+            entry_tbl.set("external_id", eid.clone())?;
+        }
+        let ctx = self.build_ctx(Some(plugin_name), &[])?;
+        let result: mlua::Value = props_fn
+            .call_async((entry_tbl, ctx))
+            .await
+            .map_err(|e| Error::Internal(anyhow!("properties({plugin_name}): {e}")))?;
+        match result {
+            mlua::Value::Nil => Ok(None),
+            mlua::Value::String(s) => Ok(Some(s.to_str()?.to_string())),
+            other => Ok(lua_to_json(&other).map(|j| j.to_string())),
+        }
+    }
+
     /// Ask every plugin that exports `auto_detect(ctx)` to probe
     /// well-known filesystem locations and report any that exist.
     /// Returns `(plugin_name -> [paths])`. Plugins without an
@@ -692,6 +740,61 @@ fn json_to_lua(lua: &Lua, val: &serde_json::Value) -> LuaResult<LuaValue> {
             }
             Ok(LuaValue::Table(t))
         }
+    }
+}
+
+/// Convert a `LuaValue` back to `serde_json::Value`. Lua tables are
+/// treated as arrays iff they have only contiguous 1..=N integer keys;
+/// otherwise as objects (keys stringified). `Nil`/`LightUserData`/
+/// `Function`/`Thread`/`UserData`/`Error` produce `None`.
+fn lua_to_json(val: &LuaValue) -> Option<serde_json::Value> {
+    match val {
+        LuaValue::Nil => Some(serde_json::Value::Null),
+        LuaValue::Boolean(b) => Some(serde_json::Value::Bool(*b)),
+        LuaValue::Integer(i) => Some(serde_json::Value::Number((*i).into())),
+        LuaValue::Number(n) => serde_json::Number::from_f64(*n).map(serde_json::Value::Number),
+        LuaValue::String(s) => s
+            .to_str()
+            .ok()
+            .map(|cow| serde_json::Value::String(cow.to_string())),
+        LuaValue::Table(t) => {
+            let len = t.raw_len();
+            let mut all_int = len > 0;
+            let mut count = 0;
+            for pair in t.clone().pairs::<LuaValue, LuaValue>() {
+                count += 1;
+                let Ok((k, _)) = pair else {
+                    all_int = false;
+                    break;
+                };
+                if !matches!(&k, LuaValue::Integer(_)) {
+                    all_int = false;
+                    break;
+                }
+            }
+            if all_int && count == len {
+                let mut arr = Vec::with_capacity(len);
+                for i in 1..=len {
+                    let v: LuaValue = t.get(i).ok()?;
+                    arr.push(lua_to_json(&v)?);
+                }
+                Some(serde_json::Value::Array(arr))
+            } else {
+                let mut map = serde_json::Map::new();
+                for pair in t.clone().pairs::<LuaValue, LuaValue>() {
+                    let (k, v) = pair.ok()?;
+                    let key = match k {
+                        LuaValue::String(s) => s.to_str().ok()?.to_string(),
+                        LuaValue::Integer(i) => i.to_string(),
+                        LuaValue::Number(n) => n.to_string(),
+                        _ => continue,
+                    };
+                    map.insert(key, lua_to_json(&v)?);
+                }
+                Some(serde_json::Value::Object(map))
+            }
+        }
+        _ => None,
     }
 }
 

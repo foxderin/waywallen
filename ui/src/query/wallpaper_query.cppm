@@ -112,6 +112,44 @@ private:
     model::Wallpaper m_wallpaper;
 };
 
+export class WallpaperPropertySetQuery
+    : public Query,
+      public QueryExtra<control::v1::Response, WallpaperPropertySetQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    /// Wallpaper to edit. Empty disables `reload()`.
+    Q_PROPERTY(QString wallpaperId READ wallpaperId WRITE setWallpaperId NOTIFY wallpaperIdChanged FINAL)
+    /// Property key (matches a key in the schema, e.g. `u_brightness`).
+    Q_PROPERTY(QString propertyKey READ propertyKey WRITE setPropertyKey NOTIFY propertyKeyChanged FINAL)
+    /// Serialized value: color → "r g b" / "r g b a"; slider → number;
+    /// bool → "true"/"false"; string → raw. Empty clears the override.
+    Q_PROPERTY(QString propertyValue READ propertyValue WRITE setPropertyValue NOTIFY propertyValueChanged FINAL)
+
+public:
+    WallpaperPropertySetQuery(QObject* parent = nullptr);
+
+    auto wallpaperId() const -> const QString&;
+    void setWallpaperId(const QString&);
+
+    auto propertyKey() const -> const QString&;
+    void setPropertyKey(const QString&);
+
+    auto propertyValue() const -> const QString&;
+    void setPropertyValue(const QString&);
+
+    void reload() override;
+
+    Q_SIGNAL void wallpaperIdChanged();
+    Q_SIGNAL void propertyKeyChanged();
+    Q_SIGNAL void propertyValueChanged();
+
+private:
+    QString m_wallpaper_id;
+    QString m_property_key;
+    QString m_property_value;
+};
+
 export class WallpaperApplyQuery : public Query, public QueryExtra<control::v1::Response, WallpaperApplyQuery> {
     Q_OBJECT
     QML_ELEMENT

@@ -61,6 +61,7 @@ qt_add_protobuf(waywallen-control
 
 set(SOURCES_NO_MOC
   src/action.cpp
+  src/util.cpp
   src/backend.cpp
   src/app.cpp
   src/daemon_dbus.cpp
@@ -73,6 +74,7 @@ set(SOURCES_NO_MOC
   src/model/store_item.cpp
   src/model/list_models.cpp
   src/model/filter_rule_model.cpp
+  src/model/user_property_model.cpp
   src/query/wallpaper_query.cpp
   src/query/renderer_query.cpp
   src/query/source_query.cpp
@@ -90,6 +92,7 @@ set(SOURCES
 
 set(MOC_SOURCE_FILES
   src/action.cppm
+  src/util.cppm
   src/app.cppm
   src/backend.cppm
   src/daemon_dbus.cppm
@@ -102,6 +105,7 @@ set(MOC_SOURCE_FILES
   src/model/store_item.cppm
   src/model/list_models.cppm
   src/model/filter_rule_model.cppm
+  src/model/user_property_model.cppm
   src/query/wallpaper_query.cppm
   src/query/renderer_query.cppm
   src/query/source_query.cppm

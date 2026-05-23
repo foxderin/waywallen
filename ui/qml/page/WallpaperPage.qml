@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 pragma ValueTypeBehavior: Assertable
 import QtQuick
+import QtQml as Qml
 import QtQuick.Layouts
 import QtQuick.Templates as T
 import Qcm.Material as MD
@@ -50,6 +51,17 @@ MD.Page {
 
     W.WallpaperApplyQuery {
         id: applyQuery
+    }
+
+    // After a successful apply the renderer eventually emits
+    // `ReportProperties`; re-fetch the detail entry so the
+    // UserPropertyPanel picks up the freshly-published schema.
+    Connections {
+        target: applyQuery
+        function onRendererIdChanged() {
+            if (applyQuery.rendererId)
+                wallpaperGetQuery.reload();
+        }
     }
 
     // Detail panel uses this to fetch the freshest view (tags + media
@@ -461,22 +473,75 @@ MD.Page {
             contentItem: ColumnLayout {
                 spacing: 0
 
-                MD.Flickable {
-                    id: m_detail_flick
+                // Per-wallpaper user-property edits feed the daemon
+                // through a single reused query — propertyKey/value
+                // are rewritten on each flush.
+                W.WallpaperPropertySetQuery {
+                    id: setQuery
+                    wallpaperId: root.selectedWallpaper?.id_proto ?? ""
+                }
+
+                W.UserPropertyListModel {
+                    id: userPropModel
+                    schemaJson: wallpaperGetQuery.wallpaper?.userPropertiesSchema ?? ""
+                    overridesJson: wallpaperGetQuery.wallpaper?.userPropertyOverrides ?? ""
+                }
+
+                // Wire-side write buffer. The model emits one
+                // `valueChanged` per user edit; we accumulate the latest
+                // per key here and only fire the daemon RPC after the
+                // user stops touching things for 200ms.
+                QtObject {
+                    id: m_pending_writes
+                    property var entries: ({})
+                }
+
+                Qml.Timer {
+                    id: m_flush_timer
+                    interval: 200
+                    repeat: false
+                    onTriggered: {
+                        const e = m_pending_writes.entries;
+                        for (const k in e) {
+                            setQuery.propertyKey = k;
+                            setQuery.propertyValue = e[k];
+                            setQuery.reload();
+                        }
+                        m_pending_writes.entries = {};
+                    }
+                }
+
+                Connections {
+                    target: userPropModel
+                    function onValueChanged(key, value) {
+                        const e = m_pending_writes.entries;
+                        e[key] = value;
+                        m_pending_writes.entries = e;
+                        m_flush_timer.restart();
+                    }
+                }
+
+                MD.VerticalListView {
+                    id: m_detail_view
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    contentHeight: m_detail_col.implicitHeight
+                    clip: true
+                    model: userPropModel
+                    spacing: 8
+                    leftMargin: 16
+                    rightMargin: 16
+                    topMargin: 0
+                    bottomMargin: 8
 
-                    ColumnLayout {
-                        id: m_detail_col
-                        width: m_detail_flick.width
-                        spacing: 0
+                    header: ColumnLayout {
+                        width: m_detail_view.contentWidth
+                        spacing: 12
 
                         // Preview
                         W.ThumbnailImage {
                             Layout.fillWidth: true
                             Layout.preferredHeight: visible ? 200 : 0
-                            Layout.margins: 12
+                            Layout.topMargin: 12
                             visible: (root.selectedWallpaper?.preview ?? "") !== ""
                                      || (["video", "image"].indexOf(root.selectedWallpaper?.wpType ?? "") >= 0
                                          && (root.selectedWallpaper?.resource ?? "") !== "")
@@ -486,15 +551,7 @@ MD.Page {
                             fillMode: Image.PreserveAspectFit
                         }
 
-                        // Info section
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            Layout.leftMargin: 16
-                            Layout.rightMargin: 16
-                            Layout.bottomMargin: 16
-                            spacing: 12
-
-                        // Close button row
+                        // Title row
                         RowLayout {
                             Layout.fillWidth: true
 
@@ -633,95 +690,283 @@ MD.Page {
                             }
                         }
 
-                        MD.Divider {
+                        // Description (project.json `description`) — collapsed
+                        // to a fixed line count by default; user clicks the
+                        // chevron to expand. Source string is Steam Workshop
+                        // BBCode + bare URLs + `\n` line breaks; the C++
+                        // `W.Util.bbcodeToHtml` helper converts it to the
+                        // Qt.StyledText HTML subset before display.
+                        ColumnLayout {
+                            id: m_description
                             Layout.fillWidth: true
+                            spacing: 4
+                            visible: (wallpaperGetQuery.wallpaper?.description ?? "") !== ""
+
+                            property bool expanded: false
+                            // Collapsed view shows 3 lines; expanded shows all.
+                            readonly property int collapsedLines: 3
+
+                            MD.Divider {
+                                Layout.fillWidth: true
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+
+                                MD.Text {
+                                    Layout.fillWidth: true
+                                    text: "Description"
+                                    typescale: MD.Token.typescale.label_large
+                                    color: MD.Token.color.on_surface_variant
+                                }
+
+                                MD.IconButton {
+                                    icon.name: m_description.expanded ? MD.Token.icon.expand_less
+                                                                       : MD.Token.icon.expand_more
+                                    visible: m_descText.lineCount > m_description.collapsedLines
+                                          || m_description.expanded
+                                    onClicked: m_description.expanded = !m_description.expanded
+                                }
+                            }
+
+                            MD.Text {
+                                id: m_descText
+                                Layout.fillWidth: true
+                                text: W.Util.bbcodeToHtml(
+                                    wallpaperGetQuery.wallpaper?.description ?? "")
+                                textFormat: Text.StyledText
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                                wrapMode: Text.WordWrap
+                                maximumLineCount: m_description.expanded
+                                                  ? Number.MAX_SAFE_INTEGER
+                                                  : m_description.collapsedLines
+                                elide: m_description.expanded ? Text.ElideNone
+                                                              : Text.ElideRight
+                                onLinkActivated: link => Qt.openUrlExternally(link)
+                            }
                         }
 
-                        // Apply target — chip row over DisplayManager.displays
-                        // plus a leading "All" chip. Multi-select; empty
-                        // selection ⇒ "All" (applied to every display).
-                        // Resolution / FPS are resolved daemon-side from
-                        // plugin settings, not configured here.
+                        // "Properties" section header — sits inside the
+                        // ListView's `header` so the title hides cleanly
+                        // when the model is empty.
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 4
-                            visible: (W.App.displayManager.displays || []).length > 0
+                            visible: userPropModel.count > 0
 
-                            MD.Text {
-                                text: "Apply to"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
+                            MD.Divider { Layout.fillWidth: true }
 
-                            Flow {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 6
+                                spacing: 4
 
-                                MD.FilterChip {
-                                    text: "All"
-                                    checked: root.isTargetAll()
-                                    onClicked: root.applyTargetIds = []
+                                MD.Text {
+                                    Layout.fillWidth: true
+                                    text: "Properties"
+                                    typescale: MD.Token.typescale.label_large
+                                    color: MD.Token.color.on_surface_variant
                                 }
 
-                                Repeater {
-                                    model: W.App.displayManager.displays
+                                MD.IconButton {
+                                    icon.name: MD.Token.icon.restart_alt
+                                    mdState.size: MD.Enum.XS
+                                    onClicked: userPropModel.resetAll()
 
-                                    MD.FilterChip {
-                                        required property var modelData
-                                        text: modelData?.name || ("Display " + modelData?.id)
-                                        checked: root.applyTargetIds.indexOf(modelData?.id) >= 0
-                                        onClicked: root.toggleTarget(modelData?.id)
+                                    MD.ToolTip {
+                                        visible: parent.hovered
+                                        text: "Reset to defaults"
                                     }
                                 }
                             }
                         }
+                    }
 
-                        // Renderer pick — only shown when the wallpaper
-                        // type has more than one registered renderer.
-                        // Single-select chip row; defaults to the highest-
-                        // priority candidate (index 0).
-                        ColumnLayout {
+                    // Per-property delegate. owe-supported types
+                    // (color / slider / bool) draw their native editor;
+                    // anything else is a disabled label so the user
+                    // knows the property exists.
+                    delegate: ColumnLayout {
+                        id: m_prop_delegate
+                        required property string key
+                        required property string label
+                        required property string type
+                        required property bool   supported
+                        required property real   minVal
+                        required property real   maxVal
+                        required property string currentValue
+                        required property bool   hasAlpha
+
+                        width: ListView.view ? (ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin) : 0
+                        spacing: 2
+
+                        MD.Text {
+                            text: m_prop_delegate.label
+                            textFormat: Text.StyledText
+                            typescale: MD.Token.typescale.label_medium
+                            color: MD.Token.color.on_surface
                             Layout.fillWidth: true
-                            spacing: 4
-                            visible: root.rendererCandidates.length >= 2
-
-                            MD.Text {
-                                text: "Renderer"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
-
-                            Flow {
-                                Layout.fillWidth: true
-                                spacing: 6
-
-                                Repeater {
-                                    model: root.rendererCandidates
-
-                                    MD.FilterChip {
-                                        required property var modelData
-                                        required property int index
-                                        text: modelData?.name || ""
-                                        checked: root.rendererIndex === index
-                                        onClicked: root.rendererIndex = index
-                                    }
-                                }
-                            }
+                            wrapMode: Text.WordWrap
+                            onLinkActivated: link => Qt.openUrlExternally(link)
                         }
 
+                        // Bool → switch.
+                        // Plain `checked: …` bindings get severed the first
+                        // time the control writes its own state (Switch
+                        // toggle on click, Slider drag, ColorPicker accept).
+                        // Use Binding so model-driven changes (esp. Reset)
+                        // still flow back into the control afterwards.
+                        MD.Switch {
+                            id: m_switch
+                            visible: m_prop_delegate.type === "bool"
+                            onToggled: userPropModel.setValue(m_prop_delegate.key,
+                                                              checked ? "true" : "false")
+                        }
+                        Binding {
+                            target: m_switch
+                            property: "checked"
+                            value: m_prop_delegate.currentValue === "true"
+                        }
+
+                        // Slider → MD.Slider with right-aligned readout
+                        RowLayout {
+                            visible: m_prop_delegate.type === "slider"
+                            Layout.fillWidth: true
+                            spacing: 8
+                            MD.Slider {
+                                id: m_slider
+                                Layout.fillWidth: true
+                                from: m_prop_delegate.minVal
+                                to:   m_prop_delegate.maxVal
+                                onMoved: userPropModel.setValue(m_prop_delegate.key, String(value))
+                            }
+                            MD.Text {
+                                text: Number(m_prop_delegate.currentValue).toFixed(3)
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                Layout.preferredWidth: 56
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                        Binding {
+                            target: m_slider
+                            property: "value"
+                            value: Number(m_prop_delegate.currentValue)
+                        }
+
+                        // Color → MD.ColorPickerButton; alpha surfaces
+                        // only when the wire value already had 4 floats
+                        // (WE almost always emits RGB).
+                        MD.ColorPickerButton {
+                            id: m_color
+                            visible: m_prop_delegate.type === "color"
+                            Layout.preferredWidth: 80
+                            Layout.preferredHeight: 32
+                            showAlpha: m_prop_delegate.hasAlpha
+                            onAccepted: c => userPropModel.setValue(
+                                m_prop_delegate.key,
+                                W.Util.colorToWire(c, showAlpha))
+                        }
+                        Binding {
+                            target: m_color
+                            property: "color"
+                            value: W.Util.colorFromWire(m_prop_delegate.currentValue)
+                        }
+
+                        // Unsupported owe types: disabled row so users see
+                        // the property exists, but editing is a no-op.
+                        MD.Text {
+                            visible: !m_prop_delegate.supported
+                            text: "(" + m_prop_delegate.type + " — not yet supported)"
+                            typescale: MD.Token.typescale.body_small
+                            color: MD.Token.color.on_surface_variant
                         }
                     }
                 }
 
-                // Apply controls — sit outside the Flickable so they remain
-                // visible regardless of how far the detail content scrolls.
+                // Footer: pinned outside the Flickable so the Apply controls
+                // — including target / renderer selectors — stay visible
+                // regardless of how far the detail content scrolls.
                 ColumnLayout {
                     Layout.fillWidth: true
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
                     Layout.topMargin: 8
-                    Layout.bottomMargin: 16
-                    spacing: 12
+                    Layout.bottomMargin: 8
+                    spacing: 8
+
+                    // Apply target — chip row over DisplayManager.displays
+                    // plus a leading "All" chip. Multi-select; empty
+                    // selection ⇒ "All" (applied to every display).
+                    // Resolution / FPS are resolved daemon-side from
+                    // plugin settings, not configured here.
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+                        visible: (W.App.displayManager.displays || []).length > 0
+
+                        MD.Text {
+                            text: "Apply to"
+                            typescale: MD.Token.typescale.label_medium
+                            color: MD.Token.color.on_surface_variant
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            MD.FilterChip {
+                                text: "All"
+                                checked: root.isTargetAll()
+                                onClicked: root.applyTargetIds = []
+                            }
+
+                            Repeater {
+                                model: W.App.displayManager.displays
+
+                                MD.FilterChip {
+                                    required property var modelData
+                                    text: modelData?.name || ("Display " + modelData?.id)
+                                    checked: root.applyTargetIds.indexOf(modelData?.id) >= 0
+                                    onClicked: root.toggleTarget(modelData?.id)
+                                }
+                            }
+                        }
+                    }
+
+                    // Renderer pick — only shown when the wallpaper
+                    // type has more than one registered renderer.
+                    // Single-select chip row; defaults to the highest-
+                    // priority candidate (index 0).
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+                        visible: root.rendererCandidates.length >= 2
+
+                        MD.Text {
+                            text: "Renderer"
+                            typescale: MD.Token.typescale.label_medium
+                            color: MD.Token.color.on_surface_variant
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: root.rendererCandidates
+
+                                MD.FilterChip {
+                                    required property var modelData
+                                    required property int index
+                                    text: modelData?.name || ""
+                                    checked: root.rendererIndex === index
+                                    onClicked: root.rendererIndex = index
+                                }
+                            }
+                        }
+                    }
 
                     // Apply button — disabled when no display is
                     // registered (daemon would reject the call with

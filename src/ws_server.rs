@@ -659,6 +659,7 @@ async fn dispatch_inner(
                 extent_mode: crate::settings::extent_mode::AS_GIVEN,
                 test_pattern: false,
                 renderer_name: None,
+                user_properties_json: None,
             };
             // renderer_manager returns the typed Error directly (spawn
             // produces RendererSpawnFailed/NoRendererForType/RendererNotFound
@@ -857,6 +858,11 @@ async fn dispatch_inner(
                 .collect();
             let tag_map = repo::list_tags_for_items(&state.db, &page_item_ids).await?;
 
+            // WallpaperList intentionally does NOT fill user-property
+            // schema/overrides — the schema is renderer-published (only
+            // available for an actively-running wallpaper) and the
+            // overrides need a per-item DB read. Detail panel grabs
+            // both via WallpaperGet.
             let entries: Vec<pb::WallpaperEntry> = page_entries
                 .into_iter()
                 .map(|e| {
@@ -867,7 +873,7 @@ async fn dispatch_inner(
                         .and_then(|m| tag_map.get(&m.id))
                         .cloned()
                         .unwrap_or_default();
-                    entry_to_pb(e, db_meta, tags)
+                    entry_to_pb(e, db_meta, tags, String::new(), String::new())
                 })
                 .collect();
 
@@ -898,10 +904,77 @@ async fn dispatch_inner(
             } else {
                 Vec::new()
             };
+            // Source plugin owns the property schema — read project.json
+            // (or equivalent) on demand. Empty string when the plugin
+            // doesn't expose properties or this entry has none.
+            let schema = state
+                .source_manager
+                .lock()
+                .await
+                .call_properties(&entry.plugin_name, &entry)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let overrides = if let Some(m) = db_meta.as_ref() {
+                repo::get_user_property_overrides_raw(&state.db, m.id).await?
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
 
             Res::WallpaperGet(pb::WallpaperGetResponse {
-                entry: Some(entry_to_pb(&entry, db_meta.as_ref(), tags)),
+                entry: Some(entry_to_pb(&entry, db_meta.as_ref(), tags, schema, overrides)),
             })
+        }
+
+        Req::WallpaperPropertySet(r) => {
+            let snap = state.source_snapshot.read().await;
+            let entry = snap
+                .get(&r.wallpaper_id)
+                .ok_or_else(|| Error::WallpaperNotFound(r.wallpaper_id.clone()))?;
+            // Persist to DB (best-effort: the renderer push below still
+            // succeeds when no DB row exists yet).
+            let mut persist_tag = String::from("skip");
+            if let Some(rel) =
+                crate::model::sync::relative_under_root(&entry.library_root, &entry.resource)
+            {
+                if let Some(m) =
+                    repo::find_item_by_library_path(&state.db, &entry.library_root, &rel).await?
+                {
+                    repo::merge_user_property_overrides(
+                        &state.db,
+                        m.id,
+                        &[(r.key.clone(), r.value.clone())],
+                    )
+                    .await?;
+                    persist_tag = format!("item={}", m.id);
+                }
+            }
+            // Push live: unknown keys on the renderer side go through
+            // setPropertyString → MainSetProperty → shader cbuffer.
+            let push_tag = if let Some(h) =
+                state.renderer_manager.find_by_resource(&entry.resource).await
+            {
+                let kv = vec![(r.key.clone(), r.value.clone())];
+                let id = h.id.clone();
+                state
+                    .renderer_manager
+                    .send_control(&h.id, ControlMsg::SettingChanged { settings: kv })
+                    .await
+                    .map_err(|e| Error::Internal(anyhow::anyhow!(
+                        "send setting_changed to renderer {}: {e}",
+                        h.id
+                    )))?;
+                format!("renderer={id}")
+            } else {
+                String::from("offline")
+            };
+            log::debug!(
+                "WallpaperPropertySet: {}={} on {} persist={} push={}",
+                r.key, r.value, r.wallpaper_id, persist_tag, push_tag
+            );
+            Res::WallpaperPropertySet(pb::WallpaperPropertySetResponse {})
         }
 
         Req::WallpaperScan(_) => {
@@ -1051,6 +1124,31 @@ async fn dispatch_inner(
 
             let plugin_kv = state.settings.plugin(&plugin_name).unwrap_or_default();
 
+            // Per-item user-property overrides ride as a separate JSON
+            // payload in `Init.user_properties` (decoupled from the
+            // schema-validated plugin settings). The renderer parses it
+            // once on startup and routes each entry through the WE
+            // user-property pipeline; no name collisions with plugin
+            // settings are possible.
+            let mut user_properties_json: Option<String> = None;
+            if !entry.library_root.is_empty() {
+                if let Some(rel) = crate::model::sync::relative_under_root(
+                    &entry.library_root,
+                    &entry.resource,
+                ) {
+                    if let Some(m) = repo::find_item_by_library_path(
+                        &state.db,
+                        &entry.library_root,
+                        &rel,
+                    )
+                    .await?
+                    {
+                        user_properties_json =
+                            repo::get_user_property_overrides_raw(&state.db, m.id).await?;
+                    }
+                }
+            }
+
             // SPAWN_VERSION 3: extras (canonical `path` + manifest
             // whitelist like `assets`/`workshop_id`) ride as CLI
             // argv. Ask the source plugin for the dict via its
@@ -1081,6 +1179,7 @@ async fn dispatch_inner(
                 } else {
                     Some(plugin_name.clone())
                 },
+                user_properties_json,
             };
 
             // Reuse an existing renderer when wp_type / extent / plugin
@@ -1559,6 +1658,8 @@ fn entry_to_pb(
     e: &crate::wallpaper_type::WallpaperEntry,
     db_meta: Option<&crate::model::entities::item::Model>,
     tags: Vec<String>,
+    user_properties_schema: String,
+    user_property_overrides: String,
 ) -> pb::WallpaperEntry {
     // Prefer DB values (freshest, written by the probe task); fall back to
     // what the Lua plugin may have pre-filled on the in-memory entry.
@@ -1587,6 +1688,12 @@ fn entry_to_pb(
         })
         .or_else(|| e.preview.clone().filter(|s| !s.is_empty()))
         .unwrap_or_default();
+    // DB row's description wins (probe task keeps it fresh); fall back to
+    // the in-memory entry from the Lua scan.
+    let description = db_meta
+        .and_then(|m| m.description.clone())
+        .or_else(|| e.description.clone())
+        .unwrap_or_default();
 
     pb::WallpaperEntry {
         id: e.id.clone(),
@@ -1600,6 +1707,9 @@ fn entry_to_pb(
         height,
         content_rating,
         tags,
+        user_properties_schema,
+        user_property_overrides,
+        description,
     }
 }
 

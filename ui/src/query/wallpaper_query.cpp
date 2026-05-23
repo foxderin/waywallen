@@ -257,6 +257,60 @@ void WallpaperGetQuery::reload() {
 }
 
 // ---------------------------------------------------------------------------
+// WallpaperPropertySetQuery
+// ---------------------------------------------------------------------------
+
+WallpaperPropertySetQuery::WallpaperPropertySetQuery(QObject* parent): Query(parent) {}
+
+auto WallpaperPropertySetQuery::wallpaperId() const -> const QString& { return m_wallpaper_id; }
+void WallpaperPropertySetQuery::setWallpaperId(const QString& v) {
+    if (m_wallpaper_id != v) {
+        m_wallpaper_id = v;
+        Q_EMIT wallpaperIdChanged();
+    }
+}
+
+auto WallpaperPropertySetQuery::propertyKey() const -> const QString& { return m_property_key; }
+void WallpaperPropertySetQuery::setPropertyKey(const QString& v) {
+    if (m_property_key != v) {
+        m_property_key = v;
+        Q_EMIT propertyKeyChanged();
+    }
+}
+
+auto WallpaperPropertySetQuery::propertyValue() const -> const QString& { return m_property_value; }
+void WallpaperPropertySetQuery::setPropertyValue(const QString& v) {
+    if (m_property_value != v) {
+        m_property_value = v;
+        Q_EMIT propertyValueChanged();
+    }
+}
+
+void WallpaperPropertySetQuery::reload() {
+    if (m_wallpaper_id.isEmpty() || m_property_key.isEmpty()) return;
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::WallpaperPropertySetRequest {};
+    inner.setWallpaperId(m_wallpaper_id);
+    inner.setKey(m_property_key);
+    inner.setValue(m_property_value);
+    req.setWallpaperPropertySet(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        co_await asio::post(asio::bind_executor(self->get_executor(), use_task));
+        if (! self) co_return;
+        self->inspect_set(result, [](const proto::Response&) {
+            // No payload; success is just the absence of an error.
+        });
+        co_return;
+    });
+}
+
+// ---------------------------------------------------------------------------
 // WallpaperApplyQuery
 // ---------------------------------------------------------------------------
 

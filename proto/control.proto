@@ -60,6 +60,7 @@ message Request {
     DisplayLayoutSetRequest   display_layout_set = 40;
     GpuListRequest            gpu_list = 41;
     WallpaperGetRequest       wallpaper_get = 42;
+    WallpaperPropertySetRequest wallpaper_property_set = 43;
   }
 }
 
@@ -107,6 +108,7 @@ message Response {
     DisplayLayoutSetResponse   display_layout_set = 40;
     GpuListResponse            gpu_list = 41;
     WallpaperGetResponse       wallpaper_get = 42;
+    WallpaperPropertySetResponse wallpaper_property_set = 43;
   }
 }
 
@@ -294,6 +296,20 @@ message WallpaperEntry {
   // no matching DB row or no tags. WallpaperList batch-loads this; the
   // single-item WallpaperGet returns the freshest view.
   repeated string tags = 11;
+  // JSON dump of the renderer-published user-property schema
+  // (project.json `general.properties` merged with runtime overrides).
+  // Empty when no renderer is currently running this wallpaper.
+  string user_properties_schema = 12;
+  // Per-item edits the user has made to the schema's default values.
+  // Persisted in the DB as a JSON object (`{"key":"value", …}`) and
+  // shipped to the renderer verbatim through `Init.user_properties`;
+  // surfaced here verbatim too so the UI can `JSON.parse` once and
+  // avoid relying on Qt's QHash<QString,QString> bridge into QML.
+  // Empty string when the user hasn't edited anything.
+  string user_property_overrides = 13;
+  // Source-provided free-form description (e.g. Wallpaper Engine
+  // `project.description`). Empty when the source didn't set one.
+  string description = 14;
 }
 
 message WallpaperListRequest {
@@ -323,6 +339,19 @@ message WallpaperGetRequest {
 message WallpaperGetResponse {
   WallpaperEntry entry = 1;
 }
+
+// Commit one user-property edit for a wallpaper. The daemon persists
+// the (key, value) pair to the item's `user_property_overrides`
+// column and, if the wallpaper is currently being rendered, pushes a
+// `setting_changed` event to the renderer subprocess so the change
+// takes effect immediately. Empty `value` clears the override (revert
+// to project.json default).
+message WallpaperPropertySetRequest {
+  string wallpaper_id = 1;
+  string key = 2;
+  string value = 3;
+}
+message WallpaperPropertySetResponse {}
 
 message WallpaperScanRequest {}
 // Ack-only — the rescan now runs asynchronously on the daemon. `count`

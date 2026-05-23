@@ -833,6 +833,82 @@ pub async fn list_tags_of_item(db: &DatabaseConnection, item_id: i64) -> Result<
         .with_context(|| format!("select tags of item={item_id}"))
 }
 
+/// Read the user-property override map for an item. Empty map when
+/// the column is NULL or holds an unreadable blob.
+pub async fn get_user_property_overrides(
+    db: &DatabaseConnection,
+    item_id: i64,
+) -> Result<HashMap<String, String>> {
+    let row = item::Entity::find_by_id(item_id)
+        .one(db)
+        .await
+        .with_context(|| format!("select item by id={item_id} for overrides"))?;
+    let Some(item) = row else { return Ok(HashMap::new()) };
+    let Some(raw) = item.user_property_overrides else { return Ok(HashMap::new()) };
+    match serde_json::from_str::<HashMap<String, String>>(&raw) {
+        Ok(m) => Ok(m),
+        Err(e) => {
+            log::warn!(
+                "item {item_id}: user_property_overrides JSON unparseable ({e}); treating as empty"
+            );
+            Ok(HashMap::new())
+        }
+    }
+}
+
+/// Read the raw `user_property_overrides` column verbatim (a JSON
+/// string when set, `None` otherwise). Callers forward this byte-for-
+/// byte to the renderer through `Init.user_properties` so the renderer
+/// can do its own typed decoding (e.g. preserving numeric / boolean
+/// values without an intermediate string conversion).
+pub async fn get_user_property_overrides_raw(
+    db: &DatabaseConnection,
+    item_id: i64,
+) -> Result<Option<String>> {
+    let row = item::Entity::find_by_id(item_id)
+        .one(db)
+        .await
+        .with_context(|| format!("select item by id={item_id} for raw overrides"))?;
+    Ok(row.and_then(|it| it.user_property_overrides))
+}
+
+/// Merge `kv` into the item's override map and rewrite the column.
+/// Keys not in `kv` are preserved; keys in `kv` with an empty value
+/// are removed (a clear). The whole row is rewritten with a single
+/// UPDATE.
+pub async fn merge_user_property_overrides(
+    db: &DatabaseConnection,
+    item_id: i64,
+    kv: &[(String, String)],
+) -> Result<()> {
+    let mut current = get_user_property_overrides(db, item_id).await?;
+    for (k, v) in kv {
+        if v.is_empty() {
+            current.remove(k);
+        } else {
+            current.insert(k.clone(), v.clone());
+        }
+    }
+    let serialized = if current.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&current)
+                .context("serialize user_property_overrides")?,
+        )
+    };
+    let active = item::ActiveModel {
+        id: sea_orm::Set(item_id),
+        user_property_overrides: sea_orm::Set(serialized),
+        ..Default::default()
+    };
+    item::Entity::update(active)
+        .exec(db)
+        .await
+        .with_context(|| format!("update item {item_id} user_property_overrides"))?;
+    Ok(())
+}
+
 /// Batch variant of `list_tags_of_item`: one round-trip resolving the
 /// tag set for every requested item, grouped by item id. Items without
 /// any tag simply do not appear in the map.

@@ -171,6 +171,18 @@
     <arg name="extent_h" type="u32"/>
     <arg name="extent_mode" type="u32"/>
     <arg name="settings" type="kv_list"/>
+    <!--
+      `user_properties` — raw JSON dump of the DB row's
+      `user_property_overrides` column (an object whose keys are the
+      project.json `general.properties.<key>` names and whose values are
+      strings, numbers, booleans, or "r g b[ a]" colour strings). The
+      renderer parses it once and routes each entry through
+      `SceneWallpaper::setPropertyString` so the WE user-property
+      pipeline (CoerceUserPropertyValue → shader cbuffer) sees the
+      values before the first frame. Empty string when the wallpaper
+      has no overrides.
+    -->
+    <arg name="user_properties" type="string"/>
   </event_in>
 
   <!--
