@@ -31,12 +31,12 @@ It started life as a Wallpaper Engine plugin for KDE.
 
 ### Desktop integration
 
-| Desktop | Integration |
-|---------|-------------|
-| **KDE Plasma** | [waywallen-display](https://github.com/waywallen/waywallen-display/) |
-| **Niri** | `zwlr_layer_shell_v1` |
-| **Sway** | `zwlr_layer_shell_v1` |
-| **GNOME** | ️planned |
+| Desktop | Integration | Mouse input | Auto pause |
+|---------|-------------|:-----------:|:----------:|
+| **KDE Plasma** | [waywallen-display](https://github.com/waywallen/waywallen-display/) | ✅ | ✅ |
+| **Niri** | `zwlr_layer_shell_v1` | ✅ | ❌ |
+| **Sway** | `zwlr_layer_shell_v1` | ✅ | ❌ |
+| **GNOME** | ️planned | — | — |
 
 ## Compatibility
 
