@@ -61,6 +61,9 @@ set(CPACK_RPM_PACKAGE_LICENSE             "GPL-3.0-or-later")
 set(CPACK_RPM_PACKAGE_GROUP               "Applications/System")
 set(CPACK_RPM_PACKAGE_URL                 "${CPACK_PACKAGE_HOMEPAGE_URL}")
 set(CPACK_RPM_PACKAGE_AUTOREQ             ON)
+# Qt6 private API symbols (Qt_6_PRIVATE_API) are version-specific and
+# unavailable in distro Qt6 packages — filter them from auto-req.
+set(CPACK_RPM_PACKAGE_REQUIRES_EXCLUDE    "Qt_6_PRIVATE_API")
 set(CPACK_RPM_FILE_NAME                   RPM-DEFAULT)
 # Don't claim ownership of standard system dirs.
 set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
