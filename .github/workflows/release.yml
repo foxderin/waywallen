@@ -37,8 +37,6 @@ jobs:
             dpkg-dev rpm
 
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Miniconda
         run: |
