@@ -34,6 +34,7 @@ jobs:
             build-essential pkg-config glslang-tools \
             libfuse2 libxkbcommon0 libgl1 libegl1 \
             libglib2.0-0 \
+            libpipewire-0.3-dev libfontconfig-dev \
             dpkg-dev rpm
 
       - uses: actions/checkout@v4
