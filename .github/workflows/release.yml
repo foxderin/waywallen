@@ -1,0 +1,319 @@
+name: Build and Release Packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.2.3)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  WAYWALLEN_CONDA_ENV: waywallen
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      APPDIR: ${{ github.workspace }}/build/AppDir
+      BUILD_DIR: ${{ github.workspace }}/build/clang-release
+      TOOLS_DIR: ${{ github.workspace }}/build/_tools
+      PACKAGE_DIR: ${{ github.workspace }}/packages
+    steps:
+      - name: Install OS prereqs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl ca-certificates git bzip2 file xz-utils \
+            build-essential pkg-config glslang-tools \
+            libfuse2 libxkbcommon0 libgl1 libegl1 \
+            libglib2.0-0 \
+            dpkg-dev rpm
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Miniconda
+        run: |
+          curl -fsSL -o /tmp/miniconda.sh \
+            https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+          bash /tmp/miniconda.sh -b -p "$HOME/miniconda"
+          echo "$HOME/miniconda/bin" >> "$GITHUB_PATH"
+          echo "$HOME/miniconda/condabin" >> "$GITHUB_PATH"
+
+      - name: Install rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/miniconda/envs/waywallen
+          key: conda-${{ runner.os }}-${{ hashFiles('environment.yml') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/build/clang-release/cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'displays/*/Cargo.toml') }}
+
+      - name: Set up conda environment
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          if conda env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -qx "$WAYWALLEN_CONDA_ENV"; then
+            echo "Updating conda env: $WAYWALLEN_CONDA_ENV"
+            conda env update -n "$WAYWALLEN_CONDA_ENV" -f environment.yml --prune
+          else
+            echo "Creating conda env: $WAYWALLEN_CONDA_ENV"
+            conda env create -n "$WAYWALLEN_CONDA_ENV" -f environment.yml
+          fi
+
+      - name: Install freetype into conda env
+        run: conda install -n "$WAYWALLEN_CONDA_ENV" conda-forge::freetype
+
+      - name: Build FFmpeg
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          bash scripts/build_ffmpeg.sh
+
+      - name: Copy host syslibs (pipewire, fontconfig)
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          bash scripts/copy_syslibs.sh
+
+      - name: Build qtgrpc from source
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          QT_VER="$("$CONDA_PREFIX/bin/qmake6" -query QT_VERSION)"
+          if [[ ! -f "$CONDA_PREFIX/lib/cmake/Qt6Protobuf/Qt6ProtobufConfig.cmake" ]]; then
+            echo "Building qtgrpc v$QT_VER from source"
+            QTGRPC_SRC="${{ github.workspace }}/build/_qtgrpc-src"
+            QTGRPC_BUILD="${{ github.workspace }}/build/_qtgrpc-build"
+            rm -rf "$QTGRPC_SRC" "$QTGRPC_BUILD"
+            git clone --depth 1 --branch "v$QT_VER" \
+              https://code.qt.io/qt/qtgrpc.git "$QTGRPC_SRC"
+            cmake -S "$QTGRPC_SRC" -B "$QTGRPC_BUILD" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=clang \
+              -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_SYSROOT="$CONDA_BUILD_SYSROOT" \
+              -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+              -DCMAKE_INSTALL_PREFIX="$CONDA_PREFIX" \
+              -DQT_FEATURE_grpc=OFF \
+              -DBUILD_TESTING=OFF \
+              -DQT_BUILD_EXAMPLES=OFF \
+              -DQT_BUILD_TESTS=OFF
+            cmake --build "$QTGRPC_BUILD" --parallel
+            cmake --install "$QTGRPC_BUILD"
+          fi
+
+      - name: CMake configure
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          cmake -S "${{ github.workspace }}" -B "$BUILD_DIR" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_SYSROOT="$CONDA_BUILD_SYSROOT" \
+            -DCMAKE_C_FLAGS_INIT="-pthread" \
+            -DCMAKE_CXX_FLAGS_INIT="-pthread" \
+            -DCMAKE_LINKER=lld \
+            -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+            -DCMAKE_INSTALL_PREFIX="$APPDIR/usr" \
+            -DWAYWALLEN_BUILD_DAEMON=ON \
+            -DWAYWALLEN_BUILD_UI=ON \
+            -DWAYWALLEN_BUILD_PLUGINS=ON \
+            -DWAYWALLEN_BUILD_IMAGE_PLUGIN=ON \
+            -DWAYWALLEN_BUILD_VIDEO_PLUGIN=ON
+
+      - name: CMake build
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          cmake --build "$BUILD_DIR" --parallel
+
+      - name: Package DEB
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          mkdir -p "$PACKAGE_DIR"
+          cd "$BUILD_DIR"
+          cpack -G DEB -D CPACK_PACKAGE_DIRECTORY="$PACKAGE_DIR"
+
+      - name: Package RPM
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          mkdir -p "$PACKAGE_DIR"
+          cd "$BUILD_DIR"
+          cpack -G RPM -D CPACK_PACKAGE_DIRECTORY="$PACKAGE_DIR"
+
+      - name: Install to AppDir
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          cmake --install "$BUILD_DIR"
+
+      - name: Build open-wallpaper-engine
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+          INSTALL_DIR="$APPDIR/usr"
+          OWE_COMMIT="6b0638980a7e11dcf048d52f03dbc3bcc2d72e55"
+          OWE_SRC="${{ github.workspace }}/build/_owe-src"
+          OWE_BUILD="${{ github.workspace }}/build/_owe-build"
+
+          if [[ ! -d "$OWE_SRC/.git" ]]; then
+            git clone https://github.com/waywallen/open-wallpaper-engine.git "$OWE_SRC"
+          fi
+          git -C "$OWE_SRC" fetch --quiet origin "$OWE_COMMIT" 2>/dev/null \
+            || git -C "$OWE_SRC" fetch --quiet origin
+          git -C "$OWE_SRC" -c advice.detachedHead=false reset --hard "$OWE_COMMIT"
+
+          cmake -S "$OWE_SRC" -B "$OWE_BUILD" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_SYSROOT="$CONDA_BUILD_SYSROOT" \
+            -DCMAKE_C_FLAGS_INIT="-pthread" \
+            -DCMAKE_CXX_FLAGS_INIT="-pthread" \
+            -DCMAKE_LINKER=lld \
+            -DCMAKE_PREFIX_PATH="$INSTALL_DIR;$CONDA_PREFIX" \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
+            -DBUILD_WAYWALLEN_HOST=ON \
+            -DBUILD_WEWEB=ON \
+            -DBUILD_QML=OFF
+          cmake --build "$OWE_BUILD" --parallel
+          cmake --install "$OWE_BUILD"
+          strip "$INSTALL_DIR/share/waywallen/weweb"/*.so
+
+      - name: Download linuxdeploy tools
+        run: |
+          mkdir -p "$TOOLS_DIR"
+          for tool_url dest in \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage|$TOOLS_DIR/linuxdeploy-x86_64.AppImage" \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage|$TOOLS_DIR/linuxdeploy_plugin_qt" \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage|$TOOLS_DIR/appimagetool-x86_64.AppImage"; do
+            url="${tool_url%|*}"
+            dest="${tool_url#*|}"
+            if [[ ! -x "$dest" ]]; then
+              curl -fsSL --retry 3 -o "$dest" "$url"
+              chmod +x "$dest"
+            fi
+          done
+
+      - name: Pack AppImage
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate "$WAYWALLEN_CONDA_ENV"
+
+          DESKTOP_FILE="$APPDIR/usr/share/applications/org.waywallen.waywallen.desktop"
+          ICON_FILE="$APPDIR/usr/share/icons/hicolor/scalable/apps/org.waywallen.waywallen.svg"
+          test -f "$DESKTOP_FILE" || { echo "Missing .desktop: $DESKTOP_FILE"; exit 1; }
+          test -f "$ICON_FILE"    || { echo "Missing icon: $ICON_FILE"; exit 1; }
+
+          pushd "$TOOLS_DIR"
+          ./linuxdeploy_plugin_qt --appimage-extract
+          ./linuxdeploy-x86_64.AppImage --appimage-extract
+          LINUXDEPLOY="$TOOLS_DIR/squashfs-root/AppRun"
+          popd
+
+          cd "${{ github.workspace }}/build"
+          PATH="$TOOLS_DIR:$PATH" \
+          LD_LIBRARY_PATH="$APPDIR/usr/lib:$CONDA_PREFIX/lib" \
+          QMAKE="$CONDA_PREFIX/bin/qmake6" \
+          EXTRA_PLATFORM_PLUGINS="libqwayland.so" \
+          EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-shell-integration" \
+          "$LINUXDEPLOY" \
+            --appdir "$APPDIR" \
+            --plugin qt \
+            --executable "$APPDIR/usr/bin/waywallen" \
+            --executable "$APPDIR/usr/bin/waywallen-ui" \
+            --executable "$APPDIR/usr/bin/waywallen-display-layer-shell" \
+            --executable "$APPDIR/usr/bin/waywallen-image-renderer" \
+            --executable "$APPDIR/usr/bin/waywallen-video-renderer" \
+            --executable "$APPDIR/usr/bin/waywallen-wescene-renderer" \
+            --desktop-file "$DESKTOP_FILE" \
+            --icon-file "$ICON_FILE"
+
+          # Bundle extra runtime deps
+          cp -rv "$CONDA_PREFIX/lib/qt6/plugins/wayland-graphics-integration-client" "$APPDIR/usr/plugins/"
+          cp -v "$CONDA_PREFIX/lib/libstdc++.so.6" "$APPDIR/usr/lib/"
+          cp -v "$CONDA_PREFIX/lib/libgcc_s.so.1" "$APPDIR/usr/lib/"
+
+          # Flatten QML modules
+          pushd "$APPDIR"
+          cp -rv ./usr/lib/qt6/qml/. ./usr/qml/ 2>/dev/null || true
+          rm -rf ./usr/lib/qt6
+          # Prune unused bloat
+          rm -rf ./usr/lib/libQt6QuickDialogs*
+          rm -rf ./usr/lib/libvulkan.so.1 ./usr/lib/libva*
+          rm -rf ./usr/lib/libgcc_s.so.1
+          rm -rf ./usr/lib/libdbus-1.so.3
+          rm -rf ./usr/lib/libcom_err.so.3
+          rm -rf ./usr/lib/libkrb5*
+          rm -rf ./usr/lib/libk5crypto.so.3
+          rm -rf ./usr/lib/libgssapi_krb5*
+          rm -rf ./usr/lib/libxkbcommon*
+          rm -rf ./usr/lib/*.a
+          popd
+
+      - name: Prune unused QuickControls2 styles
+        run: |
+          for style in Basic Fusion FluentWinUI3 Imagine Material Universal designer; do
+            for libdir in "$APPDIR/usr/lib" "$APPDIR/usr/lib64"; do
+              [[ -d "$libdir" ]] || continue
+              find "$libdir" -maxdepth 1 -type f \
+                -name "libQt6QuickControls2${style}*.so*" -print -delete 2>/dev/null || true
+            done
+            rm -rf "$APPDIR/usr/qml/QtQuick/Controls/${style}" 2>/dev/null || true
+          done
+
+      - name: Create AppImage
+        run: |
+          VERSION="$(awk -F'"' '/^version *= *"/ { print $2; exit }' Cargo.toml)"
+          mkdir -p "$PACKAGE_DIR"
+          APPIMAGE_OUT="$PACKAGE_DIR/waywallen-$VERSION-x86_64.AppImage"
+
+          PATH="$TOOLS_DIR:$PATH" \
+          ARCH=x86_64 \
+          "$TOOLS_DIR/appimagetool-x86_64.AppImage" --appimage-extract-and-run \
+            --no-appstream \
+            "$APPDIR" "$APPIMAGE_OUT"
+          test -f "$APPIMAGE_OUT" || { echo "AppImage build failed"; exit 1; }
+
+      - name: List packages
+        run: |
+          echo "=== Packages ==="
+          ls -lh "$PACKAGE_DIR/"
+
+      - uses: softprops/action-gh-release@v2
+        if: ${{ github.event_name == 'release' }}
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            ${{ env.PACKAGE_DIR }}/*.deb
+            ${{ env.PACKAGE_DIR }}/*.rpm
+            ${{ env.PACKAGE_DIR }}/*.AppImage
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        with:
+          name: waywallen-packages
+          path: ${{ env.PACKAGE_DIR }}/*
