@@ -205,17 +205,19 @@ jobs:
       - name: Download linuxdeploy tools
         run: |
           mkdir -p "$TOOLS_DIR"
-          for tool_url dest in \
-            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage|$TOOLS_DIR/linuxdeploy-x86_64.AppImage" \
-            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage|$TOOLS_DIR/linuxdeploy_plugin_qt" \
-            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage|$TOOLS_DIR/appimagetool-x86_64.AppImage"; do
-            url="${tool_url%|*}"
-            dest="${tool_url#*|}"
+          download() {
+            local url="$1" dest="$2"
             if [[ ! -x "$dest" ]]; then
               curl -fsSL --retry 3 -o "$dest" "$url"
               chmod +x "$dest"
             fi
-          done
+          }
+          download "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" \
+            "$TOOLS_DIR/linuxdeploy-x86_64.AppImage"
+          download "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" \
+            "$TOOLS_DIR/linuxdeploy_plugin_qt"
+          download "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            "$TOOLS_DIR/appimagetool-x86_64.AppImage"
 
       - name: Pack AppImage
         run: |
