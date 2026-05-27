@@ -14,9 +14,10 @@ dependencies:
   - freetype
   - expat
 
-  # Used to build qtgrpc from source (conda-forge has no Qt6 Protobuf package)
-  - libprotobuf
-  - protobuf
+  # Used to build qtgrpc from source (conda-forge has no Qt6 Protobuf package).
+  # Pin to 33.x — qtgrpc's qtprotobufgen links against libprotoc.so.33.x.
+  - libprotobuf=33.*
+  - protobuf=33.*
 
   # Toolchain: clang / clang++ / lld all 22.x (BUILD.md requires >=22)
   # clang-tools provides clang-scan-deps (required by C++20 module compilation)
